@@ -1,0 +1,8 @@
+# Journal personnel (jamais poussé)
+journal/
+
+# Build Rust
+/target
+
+# Claude
+CLAUDE.md
