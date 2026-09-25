@@ -6,16 +6,31 @@
 
 ## Why
 
-AI agents increasingly write and run scripts on our machines. A generated script can delete files or send data anywhere, and nobody really reads it before it runs.
+AI agents increasingly write and run scripts on our machines. A generated script can read your secrets, delete files or send data anywhere. To be sure it won't, you would have to read every line, and nobody does.
 
-Slarz takes a different approach: every script declares its permissions up front, and the interpreter blocks everything else. To trust a script, a human reviews a few lines instead of the whole program.
+This is not hypothetical. In 2025, an AI agent deleted a production database during a code freeze, a malicious npm package turned local AI coding assistants into secret-stealing tools, and hidden instructions in a support ticket made an agent leak private database tokens.
+
+## How it works
+
+Slarz is a language plus a harness around it.
+
+- **The script asks.** Every script declares up front what it needs: which folders it reads or writes, which websites it calls. A human can review that in seconds instead of reading the whole program.
+- **The human grants.** Authorization lives outside the script, in a policy only the human controls. A script runs only if what it asks for is within what was granted. The policy is the ceiling of what can ever go wrong, even if the AI was tricked into writing a malicious script.
+- **Checked before it runs.** Scripts are statically checked, so a script that breaks the rules is rejected before it touches anything, not halfway through.
+- **No AI at run time.** A script is deterministic code. Once written and approved, it can run every day without an AI in the loop, so instructions hidden in the data it processes cannot change what it does.
 
 ## Design principles
 
-- **Explicit permissions.** Access to files, network and environment is denied by default and declared in the script.
+- **Deny by default.** No filesystem, network or environment access unless declared and granted.
+- **Friction proportional to risk.** Safe actions pass silently; new or dangerous ones trigger a clear question. Unattended runs never ask: anything not pre-approved is denied.
+- **No escape hatches.** No "skip all permissions" flag, no foreign function interface, no unsafe blocks.
 - **One way to write each thing.** Strict typing, no implicit behavior, no ambiguity.
 - **Errors written for machines and humans.** Every error says what went wrong, where, and how to fix it, so an AI can correct itself.
 - **Readable.** Our hypothesis is that AIs fail because of ambiguity, not verbosity. The benchmark will test it.
+
+## What Slarz does not do
+
+Slarz does not make AI models trustworthy. It cannot stop a model from being manipulated, and it does not cover actions an agent takes without writing a script. What it does is bound what a script can do, and make that visible.
 
 ## Roadmap
 
