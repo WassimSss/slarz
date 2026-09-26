@@ -28,6 +28,28 @@ Slarz is a language plus a harness around it.
 - **Errors written for machines and humans.** Every error says what went wrong, where, and how to fix it, so an AI can correct itself.
 - **Readable.** Our hypothesis is that AIs fail because of ambiguity, not verbosity. The benchmark will test it.
 
+## Language decisions
+
+The core semantics of v0 are settled. Each rule removes a common source of bugs or ambiguity.
+
+- **Statically typed, no escape hatch.** Type errors are caught before the script runs. There is no `any` type; data of unknown shape, like JSON, goes through an explicit type that must be inspected.
+- **Types are always written.** Variables, parameters and return values are annotated. The AI does the writing; the reader never has to guess.
+- **No null.** A variable always has a value from the moment it is declared. When an answer can be "none" (an unset environment variable, a missing JSON field), the type says so and the script must handle it.
+- **No silent failures.** Operations that can fail say so in their type, and the failure must be handled. A permission violation stops the script immediately and cannot be caught, so a script cannot probe what it is allowed to do.
+- **Immutable by default, copies on assignment.** A value never changes behind your back.
+- **One equality.** Values are compared by content, only between values of the same type, with no hidden conversions.
+- **No surprising arithmetic.** Integer overflow and division by zero stop the script. Dividing two integers is not allowed with `/`, because languages disagree on whether `7 / 2` is `3` or `3.5`.
+- **Left-to-right evaluation, guaranteed.** Side effects always happen in the order they are written.
+
+## Security layers
+
+Permissions are enforced in depth:
+
+1. **The interpreter**: a script can only reach the outside world through built-in functions, and each one checks its permission before acting. There is no way to start an external process.
+2. **The operating system**: the interpreter will sandbox itself at startup (starting with Landlock on Linux), so that even a bug in the interpreter cannot escape the granted permissions. The MCP server will also run inside a container.
+
+v0 ships with layer 1 only.
+
 ## What Slarz does not do
 
 Slarz does not make AI models trustworthy. It cannot stop a model from being manipulated, and it does not cover actions an agent takes without writing a script. What it does is bound what a script can do, and make that visible.
