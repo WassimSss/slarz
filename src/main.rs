@@ -22,11 +22,13 @@ fn main() -> ExitCode {
         Err(error) => return report(&path, &source, error.span, error.kind),
     };
 
-    match slarz::parser::parse(tokens) {
-        Ok(program) => {
-            println!("{program:#?}");
-            ExitCode::SUCCESS
-        }
+    let program = match slarz::parser::parse(tokens) {
+        Ok(program) => program,
+        Err(error) => return report(&path, &source, error.span, error.kind),
+    };
+
+    match slarz::interpreter::run(&program, &mut std::io::stdout().lock()) {
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => report(&path, &source, error.span, error.kind),
     }
 }
