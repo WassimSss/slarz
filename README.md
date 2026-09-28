@@ -2,7 +2,7 @@
 
 **A scripting language designed for AI agents: easy for an AI to write, easy for a human to review, and unable to do anything it was not allowed to.**
 
-> 🚧 Early development. Nothing runs yet. This project is built in public, one step at a time.
+> 🚧 Early development: the interpreter runs its first scripts, but permissions are not enforced yet. This project is built in public, one step at a time.
 
 ## Why
 
@@ -61,13 +61,48 @@ Slarz does not make AI models trustworthy. It cannot stop a model from being man
 3. **MCP server**: let any agent write, check and run Slarz code in a sandbox
 4. **Fine-tuning**: train a small open model on interpreter-verified examples
 
-## Building
+## Status
 
-Requires [Rust](https://www.rust-lang.org/tools/install).
+| Stage | State |
+|---|---|
+| Lexer | ✅ done |
+| Parser | ✅ done |
+| Interpreter | ✅ variables, functions, `if`, `while`, `print` |
+| Type checker | 🔜 types are checked while the script runs for now |
+| Permissions | 🔜 the header is parsed but not enforced yet |
+| Lists, `for`, files, network | 🔜 |
+
+## Installation
+
+There are no prebuilt binaries yet. Install from source with [Rust](https://www.rust-lang.org/tools/install):
 
 ```sh
-cargo run
+cargo install --git https://github.com/WassimSss/slarz
 ```
+
+## Usage
+
+```sh
+slarz script.slz
+```
+
+A script starts with its permissions, then does its work:
+
+```
+permissions { }
+
+rate: Float = 0.2;
+var total: Float = 0.0;
+
+function with_tax(amount: Float) -> Float {
+    return amount + amount * rate;
+}
+
+total = total + with_tax(100.0);
+print(total);
+```
+
+More in [`examples/`](examples/).
 
 ## License
 
