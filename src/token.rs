@@ -1,5 +1,7 @@
 //! The words of a Slarz script, as produced by the lexer.
 
+use std::fmt;
+
 /// A region of the source text, in byte offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
@@ -14,6 +16,14 @@ impl Span {
         let line = before.matches('\n').count() + 1;
         let current_line = before.rsplit('\n').next().unwrap_or("");
         (line, current_line.chars().count() + 1)
+    }
+
+    /// The span that goes from the start of `self` to the end of `other`.
+    pub fn to(self, other: Span) -> Span {
+        Span {
+            start: self.start,
+            end: other.end,
+        }
     }
 }
 
@@ -83,29 +93,71 @@ pub enum TokenKind {
     EndOfFile,
 }
 
+const KEYWORDS: [(&str, TokenKind); 16] = [
+    ("permissions", TokenKind::Permissions),
+    ("function", TokenKind::Function),
+    ("return", TokenKind::Return),
+    ("var", TokenKind::Var),
+    ("record", TokenKind::Record),
+    ("check", TokenKind::Check),
+    ("if", TokenKind::If),
+    ("else", TokenKind::Else),
+    ("while", TokenKind::While),
+    ("for", TokenKind::For),
+    ("in", TokenKind::In),
+    ("and", TokenKind::And),
+    ("or", TokenKind::Or),
+    ("not", TokenKind::Not),
+    ("true", TokenKind::True),
+    ("false", TokenKind::False),
+];
+
 impl TokenKind {
     /// The keyword spelled by `word`, if it is one.
     pub fn keyword(word: &str) -> Option<TokenKind> {
-        let kind = match word {
-            "permissions" => Self::Permissions,
-            "function" => Self::Function,
-            "return" => Self::Return,
-            "var" => Self::Var,
-            "record" => Self::Record,
-            "check" => Self::Check,
-            "if" => Self::If,
-            "else" => Self::Else,
-            "while" => Self::While,
-            "for" => Self::For,
-            "in" => Self::In,
-            "and" => Self::And,
-            "or" => Self::Or,
-            "not" => Self::Not,
-            "true" => Self::True,
-            "false" => Self::False,
-            _ => return None,
+        KEYWORDS
+            .iter()
+            .find(|(spelling, _)| *spelling == word)
+            .map(|(_, kind)| kind.clone())
+    }
+}
+
+/// How a token is named in error messages: "found `;`", "found the name `x`".
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let spelling = match self {
+            Self::Integer(value) => return write!(f, "the number `{value}`"),
+            Self::Float(value) => return write!(f, "the number `{value}`"),
+            Self::Text(text) => return write!(f, "the text {text:?}"),
+            Self::Identifier(name) => return write!(f, "the name `{name}`"),
+            Self::EndOfFile => return write!(f, "the end of the script"),
+            Self::Foreign(symbol) => symbol.spelling(),
+            Self::LeftParen => "(",
+            Self::RightParen => ")",
+            Self::LeftBrace => "{",
+            Self::RightBrace => "}",
+            Self::Comma => ",",
+            Self::Semicolon => ";",
+            Self::Colon => ":",
+            Self::Dot => ".",
+            Self::Arrow => "->",
+            Self::Plus => "+",
+            Self::Minus => "-",
+            Self::Star => "*",
+            Self::Slash => "/",
+            Self::Equal => "=",
+            Self::EqualEqual => "==",
+            Self::BangEqual => "!=",
+            Self::Less => "<",
+            Self::LessEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterEqual => ">=",
+            keyword => KEYWORDS
+                .iter()
+                .find(|(_, kind)| kind == keyword)
+                .map_or("?", |(spelling, _)| spelling),
         };
-        Some(kind)
+        write!(f, "`{spelling}`")
     }
 }
 
@@ -124,4 +176,39 @@ pub enum ForeignSymbol {
     MinusEqual,
     StarEqual,
     SlashEqual,
+}
+
+impl ForeignSymbol {
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Self::AndAnd => "&&",
+            Self::OrOr => "||",
+            Self::Bang => "!",
+            Self::TripleEqual => "===",
+            Self::BangDoubleEqual => "!==",
+            Self::PlusPlus => "++",
+            Self::MinusMinus => "--",
+            Self::PlusEqual => "+=",
+            Self::MinusEqual => "-=",
+            Self::StarEqual => "*=",
+            Self::SlashEqual => "/=",
+        }
+    }
+
+    /// What to write in Slarz instead.
+    pub fn suggestion(self) -> &'static str {
+        match self {
+            Self::AndAnd => "use `and`",
+            Self::OrOr => "use `or`",
+            Self::Bang => "use `not`",
+            Self::TripleEqual => "Slarz has a single equality, use `==`",
+            Self::BangDoubleEqual => "use `!=`",
+            Self::PlusPlus => "write `x = x + 1;`",
+            Self::MinusMinus => "write `x = x - 1;`",
+            Self::PlusEqual => "write `x = x + value;`",
+            Self::MinusEqual => "write `x = x - value;`",
+            Self::StarEqual => "write `x = x * value;`",
+            Self::SlashEqual => "write `x = x / value;`",
+        }
+    }
 }

@@ -1,4 +1,7 @@
+use std::fmt::Display;
 use std::process::ExitCode;
+
+use slarz::token::Span;
 
 fn main() -> ExitCode {
     let Some(path) = std::env::args().nth(1) else {
@@ -14,17 +17,22 @@ fn main() -> ExitCode {
         }
     };
 
-    match slarz::lexer::tokenize(&source) {
-        Ok(tokens) => {
-            for token in tokens {
-                println!("{:?}", token.kind);
-            }
+    let tokens = match slarz::lexer::tokenize(&source) {
+        Ok(tokens) => tokens,
+        Err(error) => return report(&path, &source, error.span, error.kind),
+    };
+
+    match slarz::parser::parse(tokens) {
+        Ok(program) => {
+            println!("{program:#?}");
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            let (line, column) = error.span.line_column(&source);
-            eprintln!("error: {path}:{line}:{column}: {}", error.kind);
-            ExitCode::FAILURE
-        }
+        Err(error) => report(&path, &source, error.span, error.kind),
     }
+}
+
+fn report(path: &str, source: &str, span: Span, message: impl Display) -> ExitCode {
+    let (line, column) = span.line_column(source);
+    eprintln!("error: {path}:{line}:{column}: {message}");
+    ExitCode::FAILURE
 }
