@@ -1,0 +1,23 @@
+permissions {
+    read folder "./invoices";
+    network GET "api.github.com";
+    env "GITHUB_TOKEN";
+}
+
+// A constant and a variable.
+rate: Float = 0.2;
+var count: Int = 0;
+
+function with_tax(amount: Float) -> Float {
+    return amount + amount * rate;
+}
+
+for file in check list_folder("./invoices") {
+    count = count + 1;
+}
+
+if count > 10 and not (count == 42) {
+    print("many invoices");
+} else {
+    print("a few invoices");
+}
