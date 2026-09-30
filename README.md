@@ -14,6 +14,20 @@ AI agents increasingly write and run scripts on our machines. A generated script
 
 This is not hypothetical. In 2025, an AI agent deleted a production database during a code freeze, a malicious npm package turned local AI coding assistants into secret-stealing tools, and hidden instructions in a support ticket made an agent leak private database tokens.
 
+## What Slarz is for
+
+Slarz is for the everyday tasks an AI agent does on your behalf, on your files and accounts: reading, transforming and sending data.
+
+- Sorting and renaming files
+- Turning data into other data: CSV, JSON, reports
+- Calling APIs with a secret key
+- Recurring automations: every morning, fetch this and produce that
+- Connecting two services together
+
+The same script behaves the same way on Windows, macOS and Linux: the AI writing it does not need to know which system it runs on.
+
+Slarz is **not** a general-purpose language. It is not meant for building software (that requires running compilers and other programs, which Slarz forbids on purpose), user interfaces or games.
+
 ## How it works
 
 Slarz is a language plus a harness around it.
