@@ -1,0 +1,7 @@
+permissions {
+    read folder "./notes";
+}
+
+// `check` stops the script with a clear message if the file cannot be read.
+content: Text = check read_file("./notes/today.txt");
+print(content);

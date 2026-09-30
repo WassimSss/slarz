@@ -10,6 +10,9 @@ pub enum Value {
     Bool(bool),
     /// What a function without a return type gives back.
     Nothing,
+    /// The two sides of a `Result`: an operation that worked, or why it failed.
+    Success(Box<Value>),
+    Failure(String),
 }
 
 impl Value {
@@ -21,6 +24,7 @@ impl Value {
             Self::Text(_) => "Text",
             Self::Bool(_) => "Bool",
             Self::Nothing => "Nothing",
+            Self::Success(_) | Self::Failure(_) => "Result",
         }
     }
 }
@@ -34,6 +38,8 @@ impl fmt::Display for Value {
             Self::Text(text) => write!(f, "{text}"),
             Self::Bool(value) => write!(f, "{value}"),
             Self::Nothing => write!(f, "nothing"),
+            Self::Success(value) => write!(f, "Ok({value})"),
+            Self::Failure(message) => write!(f, "Error({message})"),
         }
     }
 }

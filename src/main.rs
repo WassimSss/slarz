@@ -1,7 +1,12 @@
 use std::fmt::Display;
+use std::path::Path;
 use std::process::ExitCode;
 
 use slarz::token::Span;
+
+/// Exit code for a permission violation, distinct from ordinary errors (1)
+/// so that a scheduler or a CI job can tell an attempted breach apart.
+const PERMISSION_VIOLATION: u8 = 3;
 
 fn main() -> ExitCode {
     let Some(path) = std::env::args().nth(1) else {
@@ -27,8 +32,16 @@ fn main() -> ExitCode {
         Err(error) => return report(&path, &source, error.span, error.kind),
     };
 
-    match slarz::interpreter::run(&program, &mut std::io::stdout().lock()) {
+    let script_folder = Path::new(&path)
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match slarz::interpreter::run(&program, script_folder, &mut std::io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.kind.is_permission_violation() => {
+            report(&path, &source, error.span, error.kind);
+            ExitCode::from(PERMISSION_VIOLATION)
+        }
         Err(error) => report(&path, &source, error.span, error.kind),
     }
 }

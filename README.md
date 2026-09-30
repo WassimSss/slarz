@@ -6,7 +6,7 @@
 
 **A scripting language designed for AI agents: easy for an AI to write, easy for a human to review, and unable to do anything it was not allowed to.**
 
-> 🚧 Early development: the interpreter runs its first scripts, but permissions are not enforced yet. This project is built in public, one step at a time.
+> 🚧 Early development: the interpreter runs its first scripts and enforces read permissions. This project is built in public, one step at a time.
 
 ## Why
 
@@ -85,10 +85,10 @@ Slarz does not make AI models trustworthy. It cannot stop a model from being man
 |---|---|
 | Lexer | ✅ done |
 | Parser | ✅ done |
-| Interpreter | ✅ variables, functions, `if`, `while`, `print` |
+| Interpreter | ✅ variables, functions, `if`, `while`, `print`, `check` |
 | Type checker | 🔜 types are checked while the script runs for now |
-| Permissions | 🔜 the header is parsed but not enforced yet |
-| Lists, `for`, files, network | 🔜 |
+| Permissions | 🟡 `read` is enforced (`read_file`); `write`, `network` and `env` are coming |
+| Lists, `for`, writing files, network | 🔜 |
 
 ## Installation
 

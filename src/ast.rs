@@ -1,5 +1,7 @@
 //! The syntax tree: what the parser builds from the tokens.
 
+use std::fmt;
+
 use crate::token::Span;
 
 /// A whole script: its permissions header, then its statements.
@@ -104,6 +106,20 @@ pub struct Type {
     pub name: String,
     pub arguments: Vec<Type>,
     pub span: Span,
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some((first, rest)) = self.arguments.split_first() {
+            write!(f, "<{first}")?;
+            for argument in rest {
+                write!(f, ", {argument}")?;
+            }
+            write!(f, ">")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

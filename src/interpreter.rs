@@ -4,18 +4,22 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
+use std::path::Path;
 use std::rc::Rc;
 
 use crate::ast::{
     BinaryOperator, Block, Expression, ExpressionKind, Function, Program, Statement, StatementKind,
     Type, UnaryOperator,
 };
+use crate::permissions::Permissions;
 use crate::token::Span;
 use crate::value::Value;
 
 /// Deep enough for real scripts, shallow enough to stop runaway recursion
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
+
+const BUILTINS: [&str; 2] = ["print", "read_file"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeErrorKind {
@@ -52,6 +56,21 @@ pub enum RuntimeErrorKind {
     TooDeepRecursion,
     NotSupportedYet(&'static str),
     OutputFailed,
+    /// The script tried to reach something its `permissions` block does not
+    /// allow. It can never be caught: the script stops right away.
+    PermissionDenied {
+        access: &'static str,
+        path: String,
+    },
+    MissingPermissionPath(String),
+    /// An operation failed and `check` passed the failure up.
+    Failed(String),
+}
+
+impl RuntimeErrorKind {
+    pub fn is_permission_violation(&self) -> bool {
+        matches!(self, Self::PermissionDenied { .. })
+    }
 }
 
 /// An error that stops a running script, and where it happened.
@@ -85,7 +104,8 @@ impl fmt::Display for RuntimeErrorKind {
             }
             Self::UnknownType(name) => write!(
                 f,
-                "unknown type `{name}`: the available types are `Int`, `Float`, `Text` and `Bool`"
+                "unknown type `{name}`: the available types are `Int`, `Float`, `Text`, `Bool` \
+                 and `Result<T, Error>`"
             ),
             Self::InvalidOperands {
                 operator,
@@ -133,18 +153,36 @@ impl fmt::Display for RuntimeErrorKind {
             ),
             Self::NotSupportedYet(what) => write!(f, "{what}"),
             Self::OutputFailed => write!(f, "could not write the output"),
+            Self::PermissionDenied { access, path } => write!(
+                f,
+                "permission denied: this script may not {access} `{path}`, because its \
+                 `permissions` block does not allow it"
+            ),
+            Self::MissingPermissionPath(path) => write!(
+                f,
+                "this permission points to `{path}`, which does not exist"
+            ),
+            Self::Failed(message) => write!(f, "{message}"),
         }
     }
 }
 
 type RunResult<T> = Result<T, RuntimeError>;
 
-/// Runs `program`, writing what it prints to `output`.
-pub fn run(program: &Program, output: &mut impl Write) -> RunResult<()> {
+/// Runs `program`, writing what it prints to `output`. Paths in the script
+/// are relative to `script_folder`, the folder that holds the script.
+pub fn run(program: &Program, script_folder: &Path, output: &mut impl Write) -> RunResult<()> {
+    let permissions = Permissions::new(&program.permissions, script_folder).map_err(|missing| {
+        error(
+            RuntimeErrorKind::MissingPermissionPath(missing.path),
+            missing.span,
+        )
+    })?;
     let mut interpreter = Interpreter {
         scopes: vec![Scope::new()],
         functions: HashMap::new(),
         call_depth: 0,
+        permissions,
         output,
     };
     interpreter.declare_functions(&program.statements)?;
@@ -171,6 +209,7 @@ struct Interpreter<'o, W: Write> {
     scopes: Vec<Scope>,
     functions: HashMap<String, Rc<Function>>,
     call_depth: usize,
+    permissions: Permissions,
     output: &'o mut W,
 }
 
@@ -180,7 +219,9 @@ impl<W: Write> Interpreter<'_, W> {
     fn declare_functions(&mut self, statements: &[Statement]) -> RunResult<()> {
         for statement in statements {
             if let StatementKind::Function(function) = &statement.kind {
-                if function.name == "print" || self.functions.contains_key(&function.name) {
+                if BUILTINS.contains(&function.name.as_str())
+                    || self.functions.contains_key(&function.name)
+                {
                     return Err(error(
                         RuntimeErrorKind::AlreadyDeclared(function.name.clone()),
                         statement.span,
@@ -380,12 +421,17 @@ impl<W: Write> Interpreter<'_, W> {
                 function,
                 arguments,
             } => self.call(function, arguments, span),
-            ExpressionKind::Check(_) => Err(error(
-                RuntimeErrorKind::NotSupportedYet(
-                    "`check` is not supported yet: no operation can fail for now",
-                ),
-                span,
-            )),
+            ExpressionKind::Check(inner) => match self.evaluate(inner)? {
+                Value::Success(value) => Ok(*value),
+                Value::Failure(message) => Err(error(RuntimeErrorKind::Failed(message), span)),
+                other => Err(error(
+                    RuntimeErrorKind::TypeMismatch {
+                        expected: "Result".to_string(),
+                        found: other.type_name(),
+                    },
+                    inner.span,
+                )),
+            },
         }
     }
 
@@ -394,8 +440,10 @@ impl<W: Write> Interpreter<'_, W> {
         for argument in arguments {
             values.push(self.evaluate(argument)?);
         }
-        if name == "print" {
-            return self.print(values, span);
+        match name {
+            "print" => return self.print(values, span),
+            "read_file" => return self.read_file(values, span),
+            _ => {}
         }
         let function =
             self.functions.get(name).cloned().ok_or_else(|| {
@@ -444,6 +492,20 @@ impl<W: Write> Interpreter<'_, W> {
         self.scopes.truncate(1);
         self.scopes.extend(caller_scopes);
 
+        // A `check` that fails inside a function returning a `Result` makes
+        // the function return that failure to its caller.
+        let returns_result = function
+            .return_type
+            .as_ref()
+            .is_some_and(|return_type| return_type.name == "Result");
+        let flow = match flow {
+            Err(RuntimeError {
+                kind: RuntimeErrorKind::Failed(message),
+                ..
+            }) if returns_result => Ok(Flow::Return(Value::Failure(message))),
+            other => other,
+        };
+
         let returned = match flow? {
             Flow::Return(value) => value,
             Flow::Continue => Value::Nothing,
@@ -465,21 +527,58 @@ impl<W: Write> Interpreter<'_, W> {
         }
     }
 
+    // ----- Built-in functions -----
+
     fn print(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-        let [value] = <[Value; 1]>::try_from(arguments).map_err(|arguments| {
-            error(
-                RuntimeErrorKind::WrongArgumentCount {
-                    function: "print".to_string(),
-                    expected: 1,
-                    found: arguments.len(),
-                },
-                span,
-            )
-        })?;
+        let value = single_argument("print", arguments, span)?;
         writeln!(self.output, "{value}")
             .map_err(|_| error(RuntimeErrorKind::OutputFailed, span))?;
         Ok(Value::Nothing)
     }
+
+    // The permission is checked before the disk is touched: a denied path is
+    // never even looked at.
+    fn read_file(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+        let path = match single_argument("read_file", arguments, span)? {
+            Value::Text(path) => path,
+            other => {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch {
+                        expected: "Text".to_string(),
+                        found: other.type_name(),
+                    },
+                    span,
+                ));
+            }
+        };
+        let Some(real_path) = self.permissions.resolve_read(&path) else {
+            return Err(error(
+                RuntimeErrorKind::PermissionDenied {
+                    access: "read",
+                    path,
+                },
+                span,
+            ));
+        };
+        Ok(match std::fs::read_to_string(real_path) {
+            Ok(content) => Value::Success(Box::new(Value::Text(content))),
+            Err(reason) => Value::Failure(format!("cannot read `{path}`: {reason}")),
+        })
+    }
+}
+
+fn single_argument(function: &str, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [value] = <[Value; 1]>::try_from(arguments).map_err(|arguments| {
+        error(
+            RuntimeErrorKind::WrongArgumentCount {
+                function: function.to_string(),
+                expected: 1,
+                found: arguments.len(),
+            },
+            span,
+        )
+    })?;
+    Ok(value)
 }
 
 fn error(kind: RuntimeErrorKind, span: Span) -> RuntimeError {
@@ -488,23 +587,35 @@ fn error(kind: RuntimeErrorKind, span: Span) -> RuntimeError {
 
 // Until the checker exists, types are checked while the script runs.
 fn check_type(value: &Value, declared: &Type, span: Span) -> RunResult<()> {
-    let known = matches!(declared.name.as_str(), "Int" | "Float" | "Text" | "Bool");
-    if !known || !declared.arguments.is_empty() {
-        return Err(error(
-            RuntimeErrorKind::UnknownType(declared.name.clone()),
+    if conforms(value, declared)? {
+        return Ok(());
+    }
+    Err(error(
+        RuntimeErrorKind::TypeMismatch {
+            expected: declared.to_string(),
+            found: value.type_name(),
+        },
+        span,
+    ))
+}
+
+fn conforms(value: &Value, declared: &Type) -> RunResult<bool> {
+    match (declared.name.as_str(), declared.arguments.as_slice()) {
+        ("Int" | "Float" | "Text" | "Bool", []) => Ok(value.type_name() == declared.name),
+        ("Result", [success, failure])
+            if failure.name == "Error" && failure.arguments.is_empty() =>
+        {
+            match value {
+                Value::Success(inner) => conforms(inner, success),
+                Value::Failure(_) => Ok(true),
+                _ => Ok(false),
+            }
+        }
+        _ => Err(error(
+            RuntimeErrorKind::UnknownType(declared.to_string()),
             declared.span,
-        ));
+        )),
     }
-    if value.type_name() != declared.name {
-        return Err(error(
-            RuntimeErrorKind::TypeMismatch {
-                expected: declared.name.clone(),
-                found: value.type_name(),
-            },
-            span,
-        ));
-    }
-    Ok(())
 }
 
 fn unary(operator: UnaryOperator, value: Value) -> Result<Value, RuntimeErrorKind> {
@@ -607,12 +718,145 @@ mod tests {
 
     fn output(body: &str) -> String {
         let mut output = Vec::new();
-        run(&program(body), &mut output).unwrap();
+        run(&program(body), Path::new("."), &mut output).unwrap();
         String::from_utf8(output).unwrap()
     }
 
     fn runtime_error(body: &str) -> RuntimeErrorKind {
-        run(&program(body), &mut Vec::new()).unwrap_err().kind
+        run(&program(body), Path::new("."), &mut Vec::new())
+            .unwrap_err()
+            .kind
+    }
+
+    /// A throwaway folder holding a small set of files, next to a script:
+    /// `data/notes.txt`, `data/2025/january.txt`, `database.txt`, `secret.txt`.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let folder = std::env::temp_dir().join(format!("slarz-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("data/2025")).unwrap();
+        std::fs::write(folder.join("data/notes.txt"), "notes").unwrap();
+        std::fs::write(folder.join("data/2025/january.txt"), "january").unwrap();
+        std::fs::write(folder.join("database.txt"), "database").unwrap();
+        std::fs::write(folder.join("secret.txt"), "secret").unwrap();
+        folder
+    }
+
+    fn run_in(folder: &Path, source: &str) -> Result<String, RuntimeErrorKind> {
+        let program = parse(tokenize(source).unwrap()).unwrap();
+        let mut output = Vec::new();
+        run(&program, folder, &mut output).map_err(|error| error.kind)?;
+        Ok(String::from_utf8(output).unwrap())
+    }
+
+    fn read_in_data(folder: &Path, path: &str) -> Result<String, RuntimeErrorKind> {
+        let source = format!(
+            "permissions {{ read folder \"./data\"; }}\nprint(check read_file(\"{path}\"));"
+        );
+        run_in(folder, &source)
+    }
+
+    fn denied(path: &str) -> RuntimeErrorKind {
+        RuntimeErrorKind::PermissionDenied {
+            access: "read",
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn reads_inside_a_declared_folder() {
+        let folder = fixture("inside");
+        assert_eq!(
+            read_in_data(&folder, "./data/notes.txt"),
+            Ok("notes\n".into())
+        );
+        assert_eq!(
+            read_in_data(&folder, "./data/2025/january.txt"),
+            Ok("january\n".into())
+        );
+        assert_eq!(
+            read_in_data(&folder, "./data/2025/../notes.txt"),
+            Ok("notes\n".into())
+        );
+    }
+
+    #[test]
+    fn refuses_anything_outside() {
+        let folder = fixture("outside");
+        for path in [
+            "./database.txt",
+            "./data/../secret.txt",
+            "./data/missing/../../secret.txt",
+            "../secret.txt",
+        ] {
+            assert_eq!(read_in_data(&folder, path), Err(denied(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_a_normal_failure_not_a_violation() {
+        let folder = fixture("missing");
+        let error = read_in_data(&folder, "./data/nothing.txt").unwrap_err();
+        assert!(matches!(error, RuntimeErrorKind::Failed(_)));
+        assert!(!error.is_permission_violation());
+    }
+
+    #[test]
+    fn a_declared_file_allows_only_that_file() {
+        let folder = fixture("file");
+        let source = |path: &str| {
+            format!(
+                "permissions {{ read file \"./secret.txt\"; }}\nprint(check read_file(\"{path}\"));"
+            )
+        };
+        assert_eq!(
+            run_in(&folder, &source("./secret.txt")),
+            Ok("secret\n".into())
+        );
+        assert_eq!(
+            run_in(&folder, &source("./database.txt")),
+            Err(denied("./database.txt"))
+        );
+    }
+
+    #[test]
+    fn declared_paths_must_exist() {
+        let folder = fixture("declared");
+        assert_eq!(
+            run_in(&folder, "permissions { read folder \"./nowhere\"; }"),
+            Err(RuntimeErrorKind::MissingPermissionPath(
+                "./nowhere".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn results_and_check() {
+        let folder = fixture("results");
+        let script = "permissions { read folder \"./data\"; }
+            ok: Result<Text, Error> = read_file(\"./data/notes.txt\");
+            print(ok);
+            function load() -> Result<Text, Error> {
+                text: Text = check read_file(\"./data/nothing.txt\");
+                return read_file(\"./data/notes.txt\");
+            }
+            failed: Result<Text, Error> = load();
+            print(failed);";
+        let output = run_in(&folder, script).unwrap();
+        let mut lines = output.lines();
+        assert_eq!(lines.next(), Some("Ok(notes)"));
+        assert!(
+            lines
+                .next()
+                .unwrap()
+                .starts_with("Error(cannot read `./data/nothing.txt`")
+        );
+        assert_eq!(
+            runtime_error("x: Int = check 5;"),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "Result".to_string(),
+                found: "Int",
+            }
+        );
     }
 
     #[test]
