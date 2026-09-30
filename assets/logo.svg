@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 118">
+  <path d="M3 22L20 2L37 22Z" fill="#FE7C23"/>
+  <path fill-rule="evenodd" d="M7 22H33V44L27 52V118H13V52L7 44ZM13 27H17V39H13ZM23 27H27V39H23Z" fill="#FE7C23"/>
+  <g transform="translate(30 0)">
+    <path d="M53 22L70 2L87 22Z" fill="#FE7C23"/>
+    <path fill-rule="evenodd" d="M57 22H83V44L77 52V118H63V52L57 44ZM63 27H67V39H63ZM73 27H77V39H73Z" fill="#FE7C23"/>
+  </g>
+  <rect x="26" y="66" width="68" height="52" fill="#FE7C23"/>
+  <g transform="translate(20 39.6) scale(0.8)">
+    <path d="M14 98V44Q14 16 50 6Q86 16 86 44V98Z" fill="#FE7C23"/>
+    <path d="M22 98V46Q22 24 50 15Q78 24 78 46V98Z" fill="#ffffff"/>
+    <g stroke="#FE7C23" stroke-width="1.6"><line x1="36" y1="21" x2="36" y2="98"/><line x1="50" y1="15" x2="50" y2="98"/><line x1="64" y1="21" x2="64" y2="98"/></g>
+    <g fill="#FE7C23"><rect x="22" y="46" width="56" height="5"/><rect x="22" y="76" width="56" height="5"/><circle cx="61" cy="63" r="6.5" fill="none" stroke="#FE7C23" stroke-width="3"/><circle cx="61" cy="52.5" r="2.4"/></g>
+  </g>
+</svg>

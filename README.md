@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="Slarz logo: a castle gate" width="120">
+</p>
+
 # Slarz
 
 **A scripting language designed for AI agents: easy for an AI to write, easy for a human to review, and unable to do anything it was not allowed to.**
