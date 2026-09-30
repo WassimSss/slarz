@@ -152,6 +152,11 @@ pub enum ExpressionKind {
         arguments: Vec<Expression>,
     },
     Check(Box<Expression>),
+    /// `value otherwise fallback`: the fallback is evaluated only on failure.
+    Otherwise {
+        value: Box<Expression>,
+        fallback: Box<Expression>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

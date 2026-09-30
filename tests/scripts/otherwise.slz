@@ -1,0 +1,9 @@
+permissions {
+    read folder "./data";
+}
+
+// `otherwise` replaces a failure with a value written in the script.
+settings: Text = read_file("./data/settings.txt") otherwise "no settings";
+print(settings);
+
+print("Notes: " + read_file("./data/notes.txt") otherwise "none");

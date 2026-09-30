@@ -51,6 +51,7 @@ pub enum TokenKind {
     Var,
     Record,
     Check,
+    Otherwise,
     If,
     Else,
     While,
@@ -95,13 +96,14 @@ pub enum TokenKind {
     EndOfFile,
 }
 
-const KEYWORDS: [(&str, TokenKind); 16] = [
+const KEYWORDS: [(&str, TokenKind); 17] = [
     ("permissions", TokenKind::Permissions),
     ("function", TokenKind::Function),
     ("return", TokenKind::Return),
     ("var", TokenKind::Var),
     ("record", TokenKind::Record),
     ("check", TokenKind::Check),
+    ("otherwise", TokenKind::Otherwise),
     ("if", TokenKind::If),
     ("else", TokenKind::Else),
     ("while", TokenKind::While),

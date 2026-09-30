@@ -442,7 +442,24 @@ impl Parser {
     }
 
     fn factor(&mut self) -> ParseResult<Expression> {
-        self.left_associative(Self::unary, &FACTORS)
+        self.left_associative(Self::fallback, &FACTORS)
+    }
+
+    // `otherwise` binds tighter than arithmetic: in `"x" + a otherwise ""`,
+    // the fallback replaces `a`, which could not be added to text anyway.
+    fn fallback(&mut self) -> ParseResult<Expression> {
+        let mut value = self.unary()?;
+        while self.consume(&TokenKind::Otherwise) {
+            let fallback = self.unary()?;
+            value = Expression {
+                span: value.span.to(fallback.span),
+                kind: ExpressionKind::Otherwise {
+                    value: Box::new(value),
+                    fallback: Box::new(fallback),
+                },
+            };
+        }
+        Ok(value)
     }
 
     fn unary(&mut self) -> ParseResult<Expression> {
@@ -740,6 +757,9 @@ mod tests {
                 format!("(call {function}{arguments})")
             }
             ExpressionKind::Check(inner) => format!("(check {})", show(inner)),
+            ExpressionKind::Otherwise { value, fallback } => {
+                format!("(otherwise {} {})", show(value), show(fallback))
+            }
         }
     }
 
@@ -822,6 +842,14 @@ mod tests {
             "(check (call read_file \"a.csv\" 2))"
         );
         assert_eq!(tree("now()"), "(call now)");
+        assert_eq!(
+            tree("\"x\" + read(a) otherwise \"\""),
+            "(Add \"x\" (otherwise (call read a) \"\"))"
+        );
+        assert_eq!(
+            tree("read(a) otherwise check read(b)"),
+            "(otherwise (call read a) (check (call read b)))"
+        );
         assert_eq!(tree("[1, 2 + 3, []]"), "[1, (Add 2 3), []]");
     }
 

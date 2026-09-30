@@ -497,6 +497,9 @@ impl<W: Write> Interpreter<'_, W> {
                 self.calls_script_function(left) || self.calls_script_function(right)
             }
             ExpressionKind::Check(inner) => self.calls_script_function(inner),
+            ExpressionKind::Otherwise { value, fallback } => {
+                self.calls_script_function(value) || self.calls_script_function(fallback)
+            }
             ExpressionKind::Integer(_)
             | ExpressionKind::Float(_)
             | ExpressionKind::Text(_)
@@ -575,13 +578,12 @@ impl<W: Write> Interpreter<'_, W> {
             ExpressionKind::Check(inner) => match self.evaluate(inner)? {
                 Value::Success(value) => Ok(*value),
                 Value::Failure(message) => Err(error(RuntimeErrorKind::Failed(message), span)),
-                other => Err(error(
-                    RuntimeErrorKind::TypeMismatch {
-                        expected: "Result".to_string(),
-                        found: other.type_name(),
-                    },
-                    inner.span,
-                )),
+                other => Err(not_a_result(&other, inner.span)),
+            },
+            ExpressionKind::Otherwise { value, fallback } => match self.evaluate(value)? {
+                Value::Success(value) => Ok(*value),
+                Value::Failure(_) => self.evaluate(fallback),
+                other => Err(not_a_result(&other, value.span)),
             },
         }
     }
@@ -841,6 +843,16 @@ fn expect_text(value: Value, span: Span) -> RunResult<String> {
 
 fn error(kind: RuntimeErrorKind, span: Span) -> RuntimeError {
     RuntimeError { kind, span }
+}
+
+fn not_a_result(value: &Value, span: Span) -> RuntimeError {
+    error(
+        RuntimeErrorKind::TypeMismatch {
+            expected: "Result".to_string(),
+            found: value.type_name(),
+        },
+        span,
+    )
 }
 
 // Until the checker exists, types are checked while the script runs.
@@ -1186,6 +1198,34 @@ mod tests {
                 found: "Int",
             }
         );
+    }
+
+    #[test]
+    fn otherwise_replaces_failures_only() {
+        let folder = fixture("otherwise");
+        let script = "permissions { read folder \"./data\"; }
+            found: Text = read_file(\"./data/notes.txt\") otherwise \"default\";
+            print(found);
+            missing: Text = read_file(\"./data/nothing.txt\") otherwise \"default\";
+            print(missing);";
+        assert_eq!(run_in(&folder, script).unwrap(), "notes\ndefault\n");
+        assert_eq!(
+            runtime_error("x: Int = 5 otherwise 6;"),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "Result".to_string(),
+                found: "Int",
+            }
+        );
+    }
+
+    #[test]
+    fn otherwise_evaluates_the_fallback_only_on_failure() {
+        let folder = fixture("otherwise-lazy");
+        // Reading outside the permissions would stop the script: it must not happen.
+        let script = "permissions { read folder \"./data\"; }
+            text: Text = read_file(\"./data/notes.txt\") otherwise check read_file(\"../secret.txt\");
+            print(text);";
+        assert_eq!(run_in(&folder, script).unwrap(), "notes\n");
     }
 
     #[test]
