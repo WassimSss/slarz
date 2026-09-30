@@ -1,0 +1,16 @@
+permissions { }
+
+names: List<Text> = ["Ada", "Grace"];
+var everyone: List<Text> = names;
+everyone = append(everyone, "Linus");
+
+// `names` is untouched: modifying a list never changes another variable.
+print(names);
+print(everyone);
+print(length(everyone));
+
+var total: Int = 0;
+for n in [1, 2, 3, 4] {
+    total = total + n;
+}
+print(total);

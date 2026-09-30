@@ -1,0 +1,12 @@
+permissions {
+    read folder "./data";
+}
+
+// The first useful script: go through every file of a folder.
+var count: Int = 0;
+for path in check list_folder("./data") {
+    content: Text = check read_file(path);
+    print(path + ": " + content);
+    count = count + 1;
+}
+print(count);

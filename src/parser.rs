@@ -321,8 +321,11 @@ impl Parser {
     fn function(&mut self, start: Span) -> ParseResult<Statement> {
         let (name, _) = self.expect_identifier("a function name")?;
         self.expect(TokenKind::LeftParen, "`(` after the function name")?;
-        let parameters =
-            self.list_until_closing_paren(Self::parameter, "`,` or `)` after the parameter")?;
+        let parameters = self.list_until(
+            &TokenKind::RightParen,
+            Self::parameter,
+            "`,` or `)` after the parameter",
+        )?;
         let return_type = if self.consume(&TokenKind::Arrow) {
             Some(self.parse_type()?)
         } else {
@@ -468,6 +471,7 @@ impl Parser {
             TokenKind::False => ExpressionKind::Bool(false),
             TokenKind::Identifier(name) => return self.variable_or_call(name, token.span),
             TokenKind::LeftParen => return self.parenthesized(),
+            TokenKind::LeftBracket => return self.list_literal(token.span),
             _ => return Err(self.unexpected("an expression")),
         };
         self.advance();
@@ -485,13 +489,29 @@ impl Parser {
                 span: start,
             });
         }
-        let arguments =
-            self.list_until_closing_paren(Self::expression, "`,` or `)` after the argument")?;
+        let arguments = self.list_until(
+            &TokenKind::RightParen,
+            Self::expression,
+            "`,` or `)` after the argument",
+        )?;
         Ok(Expression {
             kind: ExpressionKind::Call {
                 function: name,
                 arguments,
             },
+            span: start.to(self.previous_span()),
+        })
+    }
+
+    fn list_literal(&mut self, start: Span) -> ParseResult<Expression> {
+        self.advance();
+        let items = self.list_until(
+            &TokenKind::RightBracket,
+            Self::expression,
+            "`,` or `]` in the list",
+        )?;
+        Ok(Expression {
+            kind: ExpressionKind::List(items),
             span: start.to(self.previous_span()),
         })
     }
@@ -518,18 +538,20 @@ impl Parser {
 
     // ----- Token helpers -----
 
-    fn list_until_closing_paren<T>(
+    /// Comma-separated items up to `closing`, which the opening token implies.
+    fn list_until<T>(
         &mut self,
+        closing: &TokenKind,
         item: fn(&mut Self) -> ParseResult<T>,
         separator: &'static str,
     ) -> ParseResult<Vec<T>> {
         let mut items = Vec::new();
-        if self.consume(&TokenKind::RightParen) {
+        if self.consume(closing) {
             return Ok(items);
         }
         loop {
             items.push(item(self)?);
-            if self.consume(&TokenKind::RightParen) {
+            if self.consume(closing) {
                 return Ok(items);
             }
             self.expect(TokenKind::Comma, separator)?;
@@ -698,6 +720,10 @@ mod tests {
             ExpressionKind::Text(text) => format!("{text:?}"),
             ExpressionKind::Bool(value) => value.to_string(),
             ExpressionKind::Variable(name) => name.clone(),
+            ExpressionKind::List(items) => {
+                let items: Vec<String> = items.iter().map(show).collect();
+                format!("[{}]", items.join(", "))
+            }
             ExpressionKind::Unary { operator, operand } => {
                 format!("({operator:?} {})", show(operand))
             }
@@ -796,6 +822,7 @@ mod tests {
             "(check (call read_file \"a.csv\" 2))"
         );
         assert_eq!(tree("now()"), "(call now)");
+        assert_eq!(tree("[1, 2 + 3, []]"), "[1, (Add 2 3), []]");
     }
 
     #[test]

@@ -19,7 +19,14 @@ use crate::value::Value;
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
 
-const BUILTINS: [&str; 3] = ["print", "read_file", "write_file"];
+const BUILTINS: [&str; 6] = [
+    "print",
+    "length",
+    "append",
+    "read_file",
+    "write_file",
+    "list_folder",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeErrorKind {
@@ -112,8 +119,8 @@ impl fmt::Display for RuntimeErrorKind {
             }
             Self::UnknownType(name) => write!(
                 f,
-                "unknown type `{name}`: the available types are `Int`, `Float`, `Text`, `Bool` \
-                 and `Result<T, Error>`"
+                "unknown type `{name}`: the available types are `Int`, `Float`, `Text`, `Bool`, \
+                 `List<T>` and `Result<T, Error>`"
             ),
             Self::InvalidOperands {
                 operator,
@@ -204,6 +211,9 @@ pub fn run(program: &Program, script: &Path, output: &mut impl Write) -> RunResu
 struct Variable {
     value: Value,
     mutable: bool,
+    // What a later assignment must match. Loop variables have none: they
+    // are constants, so they are never assigned.
+    declared: Option<Type>,
 }
 
 type Scope = HashMap<String, Variable>;
@@ -267,10 +277,13 @@ impl<W: Write> Interpreter<'_, W> {
             } => {
                 let value = self.evaluate(value)?;
                 check_type(&value, declared_type, span)?;
-                self.declare(name, value, *mutable, span)?;
+                self.declare(name, value, *mutable, Some(declared_type.clone()), span)?;
             }
             StatementKind::Assignment { name, value } => {
-                let value = self.evaluate(value)?;
+                let value = match self.append_in_place(name, value)? {
+                    Some(value) => value,
+                    None => self.evaluate(value)?,
+                };
                 self.assign(name, value, span)?;
             }
             StatementKind::Expression(expression) => {
@@ -295,13 +308,33 @@ impl<W: Write> Interpreter<'_, W> {
                     }
                 }
             }
-            StatementKind::For { .. } => {
-                return Err(error(
-                    RuntimeErrorKind::NotSupportedYet(
-                        "`for` loops are not supported yet: they need lists",
-                    ),
-                    span,
-                ));
+            StatementKind::For {
+                variable,
+                iterable,
+                body,
+            } => {
+                let items = match self.evaluate(iterable)? {
+                    Value::List(items) => items,
+                    other => {
+                        return Err(error(
+                            RuntimeErrorKind::TypeMismatch {
+                                expected: "List".to_string(),
+                                found: other.type_name(),
+                            },
+                            iterable.span,
+                        ));
+                    }
+                };
+                for item in items.iter() {
+                    self.scopes.push(Scope::new());
+                    let flow = self
+                        .declare(variable, item.clone(), false, None, span)
+                        .and_then(|()| self.execute_statements(body));
+                    self.scopes.pop();
+                    if let Flow::Return(value) = flow? {
+                        return Ok(Flow::Return(value));
+                    }
+                }
             }
             StatementKind::Function(_) if self.call_depth == 0 && self.scopes.len() == 1 => {}
             StatementKind::Function(_) => {
@@ -347,7 +380,21 @@ impl<W: Write> Interpreter<'_, W> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
 
-    fn declare(&mut self, name: &str, value: Value, mutable: bool, span: Span) -> RunResult<()> {
+    fn lookup_mut(&mut self, name: &str) -> Option<&mut Variable> {
+        self.scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
+    }
+
+    fn declare(
+        &mut self,
+        name: &str,
+        value: Value,
+        mutable: bool,
+        declared: Option<Type>,
+        span: Span,
+    ) -> RunResult<()> {
         if self.lookup(name).is_some() {
             return Err(error(
                 RuntimeErrorKind::AlreadyDeclared(name.to_string()),
@@ -355,17 +402,19 @@ impl<W: Write> Interpreter<'_, W> {
             ));
         }
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Variable { value, mutable });
+            let variable = Variable {
+                value,
+                mutable,
+                declared,
+            };
+            scope.insert(name.to_string(), variable);
         }
         Ok(())
     }
 
     fn assign(&mut self, name: &str, value: Value, span: Span) -> RunResult<()> {
         let variable = self
-            .scopes
-            .iter_mut()
-            .rev()
-            .find_map(|scope| scope.get_mut(name))
+            .lookup_mut(name)
             .ok_or_else(|| error(RuntimeErrorKind::UndefinedVariable(name.to_string()), span))?;
         if !variable.mutable {
             return Err(error(
@@ -373,10 +422,18 @@ impl<W: Write> Interpreter<'_, W> {
                 span,
             ));
         }
-        if variable.value.type_name() != value.type_name() {
+        let matches = match &variable.declared {
+            Some(declared) => conforms(&value, declared)?,
+            None => variable.value.type_name() == value.type_name(),
+        };
+        if !matches {
+            let expected = variable
+                .declared
+                .as_ref()
+                .map_or_else(|| variable.value.type_name().to_string(), Type::to_string);
             return Err(error(
                 RuntimeErrorKind::TypeMismatch {
-                    expected: variable.value.type_name().to_string(),
+                    expected,
                     found: value.type_name(),
                 },
                 span,
@@ -386,7 +443,89 @@ impl<W: Write> Interpreter<'_, W> {
         Ok(())
     }
 
+    // `x = append(x, item)` replaces `x` anyway, so its list is handed over to
+    // `append` instead of being shared with it: no copy, even for a long list.
+    // Only when `item` calls no function of the script, since such a function
+    // could read or change `x` while its list is lent out.
+    fn append_in_place(&mut self, name: &str, value: &Expression) -> RunResult<Option<Value>> {
+        let ExpressionKind::Call {
+            function,
+            arguments,
+        } = &value.kind
+        else {
+            return Ok(None);
+        };
+        let [list, item] = arguments.as_slice() else {
+            return Ok(None);
+        };
+        let appends_to_itself =
+            matches!(&list.kind, ExpressionKind::Variable(source) if source == name);
+        let is_mutable_list = self
+            .lookup(name)
+            .is_some_and(|variable| variable.mutable && matches!(variable.value, Value::List(_)));
+        if function != "append"
+            || !appends_to_itself
+            || !is_mutable_list
+            || self.calls_script_function(item)
+        {
+            return Ok(None);
+        }
+        let item = self.evaluate(item)?;
+        let Some(variable) = self.lookup_mut(name) else {
+            return Ok(None);
+        };
+        let list = std::mem::replace(&mut variable.value, Value::Nothing);
+        append_item(list, item, value.span).map(Some)
+    }
+
+    fn calls_script_function(&self, expression: &Expression) -> bool {
+        match &expression.kind {
+            ExpressionKind::Call {
+                function,
+                arguments,
+            } => {
+                self.functions.contains_key(function)
+                    || arguments
+                        .iter()
+                        .any(|argument| self.calls_script_function(argument))
+            }
+            ExpressionKind::List(items) => {
+                items.iter().any(|item| self.calls_script_function(item))
+            }
+            ExpressionKind::Unary { operand, .. } => self.calls_script_function(operand),
+            ExpressionKind::Binary { left, right, .. } => {
+                self.calls_script_function(left) || self.calls_script_function(right)
+            }
+            ExpressionKind::Check(inner) => self.calls_script_function(inner),
+            ExpressionKind::Integer(_)
+            | ExpressionKind::Float(_)
+            | ExpressionKind::Text(_)
+            | ExpressionKind::Bool(_)
+            | ExpressionKind::Variable(_) => false,
+        }
+    }
+
     // ----- Expressions -----
+
+    fn list(&mut self, items: &[Expression]) -> RunResult<Value> {
+        let mut values: Vec<Value> = Vec::with_capacity(items.len());
+        for item in items {
+            let value = self.evaluate(item)?;
+            if let Some(first) = values.first() {
+                if first.type_name() != value.type_name() {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch {
+                            expected: first.type_name().to_string(),
+                            found: value.type_name(),
+                        },
+                        item.span,
+                    ));
+                }
+            }
+            values.push(value);
+        }
+        Ok(Value::List(Rc::new(values)))
+    }
 
     fn evaluate(&mut self, expression: &Expression) -> RunResult<Value> {
         let span = expression.span;
@@ -395,6 +534,7 @@ impl<W: Write> Interpreter<'_, W> {
             ExpressionKind::Float(value) => Ok(Value::Float(*value)),
             ExpressionKind::Text(text) => Ok(Value::Text(text.clone())),
             ExpressionKind::Bool(value) => Ok(Value::Bool(*value)),
+            ExpressionKind::List(items) => self.list(items),
             ExpressionKind::Variable(name) => self
                 .lookup(name)
                 .map(|variable| variable.value.clone())
@@ -455,6 +595,12 @@ impl<W: Write> Interpreter<'_, W> {
             "print" => return self.print(values, span),
             "read_file" => return self.read_file(values, span),
             "write_file" => return self.write_file(values, span),
+            "list_folder" => return self.list_folder(values, span),
+            "length" => return length(values, span),
+            "append" => {
+                let [list, item] = exact_arguments("append", values, span)?;
+                return append_item(list, item, span);
+            }
             _ => {}
         }
         let function =
@@ -490,6 +636,7 @@ impl<W: Write> Interpreter<'_, W> {
             let variable = Variable {
                 value: argument,
                 mutable: false,
+                declared: Some(parameter.declared_type.clone()),
             };
             scope.insert(parameter.name.clone(), variable);
         }
@@ -563,6 +710,39 @@ impl<W: Write> Interpreter<'_, W> {
         })
     }
 
+    // Paths come back as the script would write them (`./invoices/a.pdf`), in
+    // alphabetical order so the result is the same on every system; folders
+    // end with `/`.
+    fn list_folder(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+        let [path] = exact_arguments("list_folder", arguments, span)?;
+        let path = expect_text(path, span)?;
+        let real_path = self
+            .permissions
+            .resolve_read(&path)
+            .map_err(|denial| error(denied("read", path.clone(), denial), span))?;
+        let failure =
+            |reason: std::io::Error| Value::Failure(format!("cannot list `{path}`: {reason}"));
+        let entries = match std::fs::read_dir(real_path) {
+            Ok(entries) => entries,
+            Err(reason) => return Ok(failure(reason)),
+        };
+        let prefix = path.trim_end_matches('/');
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(reason) => return Ok(failure(reason)),
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            let suffix = if is_folder { "/" } else { "" };
+            paths.push(format!("{prefix}/{name}{suffix}"));
+        }
+        paths.sort();
+        let list = paths.into_iter().map(Value::Text).collect();
+        Ok(Value::Success(Box::new(Value::List(Rc::new(list)))))
+    }
+
     fn write_file(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
         let [path, content] = exact_arguments("write_file", arguments, span)?;
         let path = expect_text(path, span)?;
@@ -576,6 +756,50 @@ impl<W: Write> Interpreter<'_, W> {
             Err(reason) => Value::Failure(format!("cannot write `{path}`: {reason}")),
         })
     }
+}
+
+fn length(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [value] = exact_arguments("length", arguments, span)?;
+    let length = match &value {
+        Value::List(items) => items.len(),
+        Value::Text(text) => text.chars().count(),
+        other => {
+            return Err(error(
+                RuntimeErrorKind::TypeMismatch {
+                    expected: "List` or `Text".to_string(),
+                    found: other.type_name(),
+                },
+                span,
+            ));
+        }
+    };
+    Ok(Value::Integer(i64::try_from(length).unwrap_or(i64::MAX)))
+}
+
+fn append_item(list: Value, item: Value, span: Span) -> RunResult<Value> {
+    let Value::List(mut items) = list else {
+        return Err(error(
+            RuntimeErrorKind::TypeMismatch {
+                expected: "List".to_string(),
+                found: list.type_name(),
+            },
+            span,
+        ));
+    };
+    if let Some(first) = items.first() {
+        if first.type_name() != item.type_name() {
+            return Err(error(
+                RuntimeErrorKind::TypeMismatch {
+                    expected: first.type_name().to_string(),
+                    found: item.type_name(),
+                },
+                span,
+            ));
+        }
+    }
+    // Copies the list only if another variable still shares it.
+    Rc::make_mut(&mut items).push(item);
+    Ok(Value::List(items))
 }
 
 fn denied(access: &'static str, path: String, denial: Denial) -> RuntimeErrorKind {
@@ -636,6 +860,13 @@ fn check_type(value: &Value, declared: &Type, span: Span) -> RunResult<()> {
 fn conforms(value: &Value, declared: &Type) -> RunResult<bool> {
     match (declared.name.as_str(), declared.arguments.as_slice()) {
         ("Int" | "Float" | "Text" | "Bool", []) => Ok(value.type_name() == declared.name),
+        ("List", [element]) => match value {
+            // Lists hold a single type, so the first item speaks for all.
+            Value::List(items) => items
+                .first()
+                .map_or(Ok(true), |first| conforms(first, element)),
+            _ => Ok(false),
+        },
         ("Result", [success, failure])
             if failure.name == "Error" && failure.arguments.is_empty() =>
         {
@@ -1019,6 +1250,88 @@ mod tests {
                     }
                     print(first_over(4));";
         assert_eq!(output(body), "5\n");
+    }
+
+    #[test]
+    fn lists() {
+        let body = "names: List<Text> = [\"a\", \"b\"];
+                    print(names);
+                    print(length(names));
+                    empty: List<Int> = [];
+                    print(length(empty));
+                    var total: Int = 0;
+                    for n in [1, 2, 3] { total = total + n; }
+                    print(total);
+                    grid: List<List<Int>> = [[1], [2, 3]];
+                    print(grid);";
+        assert_eq!(output(body), "[\"a\", \"b\"]\n2\n0\n6\n[[1], [2, 3]]\n");
+    }
+
+    #[test]
+    fn modifying_a_list_never_changes_another_variable() {
+        let body = "a: List<Int> = [1, 2];
+                    var b: List<Int> = a;
+                    b = append(b, 3);
+                    print(a);
+                    print(b);";
+        assert_eq!(output(body), "[1, 2]\n[1, 2, 3]\n");
+    }
+
+    #[test]
+    fn appending_in_a_loop_stays_fast() {
+        // Copying the list on every append would take billions of steps here.
+        let body = "var items: List<Int> = [];
+                    var n: Int = 0;
+                    while n < 50000 {
+                        items = append(items, n);
+                        n = n + 1;
+                    }
+                    print(length(items));";
+        let start = std::time::Instant::now();
+        assert_eq!(output(body), "50000\n");
+        assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn list_types() {
+        assert_eq!(
+            runtime_error("mixed: List<Int> = [1, \"two\"];"),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "Int".to_string(),
+                found: "Text",
+            }
+        );
+        assert_eq!(
+            runtime_error("var n: List<Int> = []; n = append(n, \"x\");"),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "List<Int>".to_string(),
+                found: "List",
+            }
+        );
+        assert_eq!(
+            runtime_error("for x in 5 { print(x); }"),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "List".to_string(),
+                found: "Int",
+            }
+        );
+    }
+
+    #[test]
+    fn list_folder_needs_read_permission() {
+        let folder = fixture("list");
+        let listed = run_in(
+            &folder,
+            "permissions { read folder \"./data\"; }
+             for path in check list_folder(\"./data\") { print(path); }",
+        );
+        assert_eq!(listed, Ok("./data/2025/\n./data/notes.txt\n".into()));
+        let outside = run_in(
+            &folder,
+            "permissions { read folder \"./data\"; }
+             paths: List<Text> = check list_folder(\".\");",
+        );
+        assert_eq!(outside, Err(not_declared("read", ".")));
     }
 
     #[test]

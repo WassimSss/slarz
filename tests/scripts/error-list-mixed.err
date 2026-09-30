@@ -1,0 +1,1 @@
+error: error-list-mixed.slz:3:26: expected a value of type `Int`, found `Text`

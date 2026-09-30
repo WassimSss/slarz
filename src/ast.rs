@@ -136,6 +136,7 @@ pub enum ExpressionKind {
     Float(f64),
     Text(String),
     Bool(bool),
+    List(Vec<Expression>),
     Variable(String),
     Unary {
         operator: UnaryOperator,
