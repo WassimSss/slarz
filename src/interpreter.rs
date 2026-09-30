@@ -497,6 +497,13 @@ impl<W: Write> Interpreter<'_, W> {
                 self.calls_script_function(left) || self.calls_script_function(right)
             }
             ExpressionKind::Check(inner) => self.calls_script_function(inner),
+            ExpressionKind::If {
+                condition,
+                then_value,
+                else_value,
+            } => [condition, then_value, else_value]
+                .iter()
+                .any(|part| self.calls_script_function(part)),
             ExpressionKind::Otherwise { value, fallback } => {
                 self.calls_script_function(value) || self.calls_script_function(fallback)
             }
@@ -580,6 +587,18 @@ impl<W: Write> Interpreter<'_, W> {
                 Value::Failure(message) => Err(error(RuntimeErrorKind::Failed(message), span)),
                 other => Err(not_a_result(&other, inner.span)),
             },
+            ExpressionKind::If {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                let chosen = if self.condition(condition)? {
+                    then_value
+                } else {
+                    else_value
+                };
+                self.evaluate(chosen)
+            }
             ExpressionKind::Otherwise { value, fallback } => match self.evaluate(value)? {
                 Value::Success(value) => Ok(*value),
                 Value::Failure(_) => self.evaluate(fallback),

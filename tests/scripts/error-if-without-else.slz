@@ -1,0 +1,3 @@
+permissions { }
+
+price: Int = if true { 8 };

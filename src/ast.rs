@@ -152,6 +152,13 @@ pub enum ExpressionKind {
         arguments: Vec<Expression>,
     },
     Check(Box<Expression>),
+    /// `if condition { a } else { b }`: only the chosen branch is evaluated.
+    /// An `else if` is an `If` stored in `else_value`.
+    If {
+        condition: Box<Expression>,
+        then_value: Box<Expression>,
+        else_value: Box<Expression>,
+    },
     /// `value otherwise fallback`: the fallback is evaluated only on failure.
     Otherwise {
         value: Box<Expression>,

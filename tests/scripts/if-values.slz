@@ -1,0 +1,16 @@
+permissions { }
+
+function price(member: Bool, student: Bool) -> Int {
+    return if member { 8 } else if student { 9 } else { 10 };
+}
+
+print(price(true, false));
+print(price(false, true));
+print(price(false, false));
+
+// Only the chosen branch runs: `missing` is never looked at.
+safe: Int = if true { 1 } else { missing };
+print(safe);
+
+label: Text = "Tickets: " + if price(true, false) < 10 { "cheap" } else { "full price" };
+print(label);

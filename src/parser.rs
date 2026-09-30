@@ -489,6 +489,7 @@ impl Parser {
             TokenKind::Identifier(name) => return self.variable_or_call(name, token.span),
             TokenKind::LeftParen => return self.parenthesized(),
             TokenKind::LeftBracket => return self.list_literal(token.span),
+            TokenKind::If => return self.if_expression(token.span),
             _ => return Err(self.unexpected("an expression")),
         };
         self.advance();
@@ -531,6 +532,40 @@ impl Parser {
             kind: ExpressionKind::List(items),
             span: start.to(self.previous_span()),
         })
+    }
+
+    fn if_expression(&mut self, start: Span) -> ParseResult<Expression> {
+        self.advance();
+        let condition = self.expression()?;
+        let then_value = self.branch()?;
+        // Without `else`, the `if` would have no value when the condition is false.
+        self.expect(
+            TokenKind::Else,
+            "`else`: an `if` that gives a value needs one for every case",
+        )?;
+        let else_value = if self.at(&TokenKind::If) {
+            self.if_expression(self.peek().span)?
+        } else {
+            self.branch()?
+        };
+        Ok(Expression {
+            span: start.to(self.previous_span()),
+            kind: ExpressionKind::If {
+                condition: Box::new(condition),
+                then_value: Box::new(then_value),
+                else_value: Box::new(else_value),
+            },
+        })
+    }
+
+    fn branch(&mut self) -> ParseResult<Expression> {
+        self.expect(TokenKind::LeftBrace, "`{` before the value")?;
+        let value = self.expression()?;
+        self.expect(
+            TokenKind::RightBrace,
+            "`}` after the value: a branch holds a single value, not statements",
+        )?;
+        Ok(value)
     }
 
     fn parenthesized(&mut self) -> ParseResult<Expression> {
@@ -757,6 +792,16 @@ mod tests {
                 format!("(call {function}{arguments})")
             }
             ExpressionKind::Check(inner) => format!("(check {})", show(inner)),
+            ExpressionKind::If {
+                condition,
+                then_value,
+                else_value,
+            } => format!(
+                "(if {} {} {})",
+                show(condition),
+                show(then_value),
+                show(else_value)
+            ),
             ExpressionKind::Otherwise { value, fallback } => {
                 format!("(otherwise {} {})", show(value), show(fallback))
             }
@@ -873,6 +918,28 @@ mod tests {
         ));
         assert!(matches!(&parsed[1], StatementKind::While { .. }));
         assert!(matches!(&parsed[2], StatementKind::For { variable, .. } if variable == "file"));
+    }
+
+    #[test]
+    fn if_expressions() {
+        assert_eq!(tree("if a { 1 } else { 2 }"), "(if a 1 2)");
+        assert_eq!(
+            tree("if a { 1 } else if b { 2 } else { 3 }"),
+            "(if a 1 (if b 2 3))"
+        );
+        assert_eq!(
+            tree("1 + if a { 2 } else { 3 } * 4"),
+            "(Add 1 (Multiply (if a 2 3) 4))"
+        );
+        assert_eq!(
+            body_error("x: Int = if a { 1 };").to_string(),
+            "expected `else`: an `if` that gives a value needs one for every case, found `;`"
+        );
+        assert_eq!(
+            body_error("x: Int = if a { print(1); 1 } else { 2 };").to_string(),
+            "expected `}` after the value: a branch holds a single value, not statements, \
+             found `;`"
+        );
     }
 
     #[test]
