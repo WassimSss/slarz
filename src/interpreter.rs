@@ -11,7 +11,7 @@ use crate::ast::{
     BinaryOperator, Block, Expression, ExpressionKind, Function, Program, Statement, StatementKind,
     Type, UnaryOperator,
 };
-use crate::permissions::Permissions;
+use crate::permissions::{Denial, Permissions};
 use crate::token::Span;
 use crate::value::Value;
 
@@ -19,7 +19,7 @@ use crate::value::Value;
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
 
-const BUILTINS: [&str; 2] = ["print", "read_file"];
+const BUILTINS: [&str; 3] = ["print", "read_file", "write_file"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeErrorKind {
@@ -62,6 +62,11 @@ pub enum RuntimeErrorKind {
         access: &'static str,
         path: String,
     },
+    /// A location no script may ever write, whatever it declares.
+    ProtectedPath {
+        path: String,
+        reason: &'static str,
+    },
     MissingPermissionPath(String),
     /// An operation failed and `check` passed the failure up.
     Failed(String),
@@ -69,7 +74,10 @@ pub enum RuntimeErrorKind {
 
 impl RuntimeErrorKind {
     pub fn is_permission_violation(&self) -> bool {
-        matches!(self, Self::PermissionDenied { .. })
+        matches!(
+            self,
+            Self::PermissionDenied { .. } | Self::ProtectedPath { .. }
+        )
     }
 }
 
@@ -158,6 +166,9 @@ impl fmt::Display for RuntimeErrorKind {
                 "permission denied: this script may not {access} `{path}`, because its \
                  `permissions` block does not allow it"
             ),
+            Self::ProtectedPath { path, reason } => {
+                write!(f, "`{path}` can never be written by a script: {reason}")
+            }
             Self::MissingPermissionPath(path) => write!(
                 f,
                 "this permission points to `{path}`, which does not exist"
@@ -169,10 +180,10 @@ impl fmt::Display for RuntimeErrorKind {
 
 type RunResult<T> = Result<T, RuntimeError>;
 
-/// Runs `program`, writing what it prints to `output`. Paths in the script
-/// are relative to `script_folder`, the folder that holds the script.
-pub fn run(program: &Program, script_folder: &Path, output: &mut impl Write) -> RunResult<()> {
-    let permissions = Permissions::new(&program.permissions, script_folder).map_err(|missing| {
+/// Runs `program`, the content of the file at `script`, writing what it
+/// prints to `output`. Paths in the script are relative to its folder.
+pub fn run(program: &Program, script: &Path, output: &mut impl Write) -> RunResult<()> {
+    let permissions = Permissions::new(&program.permissions, script).map_err(|missing| {
         error(
             RuntimeErrorKind::MissingPermissionPath(missing.path),
             missing.span,
@@ -443,6 +454,7 @@ impl<W: Write> Interpreter<'_, W> {
         match name {
             "print" => return self.print(values, span),
             "read_file" => return self.read_file(values, span),
+            "write_file" => return self.write_file(values, span),
             _ => {}
         }
         let function =
@@ -530,55 +542,77 @@ impl<W: Write> Interpreter<'_, W> {
     // ----- Built-in functions -----
 
     fn print(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-        let value = single_argument("print", arguments, span)?;
+        let [value] = exact_arguments("print", arguments, span)?;
         writeln!(self.output, "{value}")
             .map_err(|_| error(RuntimeErrorKind::OutputFailed, span))?;
         Ok(Value::Nothing)
     }
 
-    // The permission is checked before the disk is touched: a denied path is
+    // Permissions are checked before the disk is touched: a denied path is
     // never even looked at.
     fn read_file(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-        let path = match single_argument("read_file", arguments, span)? {
-            Value::Text(path) => path,
-            other => {
-                return Err(error(
-                    RuntimeErrorKind::TypeMismatch {
-                        expected: "Text".to_string(),
-                        found: other.type_name(),
-                    },
-                    span,
-                ));
-            }
-        };
-        let Some(real_path) = self.permissions.resolve_read(&path) else {
-            return Err(error(
-                RuntimeErrorKind::PermissionDenied {
-                    access: "read",
-                    path,
-                },
-                span,
-            ));
-        };
+        let [path] = exact_arguments("read_file", arguments, span)?;
+        let path = expect_text(path, span)?;
+        let real_path = self
+            .permissions
+            .resolve_read(&path)
+            .map_err(|denial| error(denied("read", path.clone(), denial), span))?;
         Ok(match std::fs::read_to_string(real_path) {
             Ok(content) => Value::Success(Box::new(Value::Text(content))),
             Err(reason) => Value::Failure(format!("cannot read `{path}`: {reason}")),
         })
     }
+
+    fn write_file(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+        let [path, content] = exact_arguments("write_file", arguments, span)?;
+        let path = expect_text(path, span)?;
+        let content = expect_text(content, span)?;
+        let real_path = self
+            .permissions
+            .resolve_write(&path)
+            .map_err(|denial| error(denied("write", path.clone(), denial), span))?;
+        Ok(match std::fs::write(real_path, content) {
+            Ok(()) => Value::Success(Box::new(Value::Nothing)),
+            Err(reason) => Value::Failure(format!("cannot write `{path}`: {reason}")),
+        })
+    }
 }
 
-fn single_argument(function: &str, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [value] = <[Value; 1]>::try_from(arguments).map_err(|arguments| {
+fn denied(access: &'static str, path: String, denial: Denial) -> RuntimeErrorKind {
+    match denial {
+        Denial::NotDeclared => RuntimeErrorKind::PermissionDenied { access, path },
+        Denial::Protected(reason) => RuntimeErrorKind::ProtectedPath { path, reason },
+    }
+}
+
+fn exact_arguments<const N: usize>(
+    function: &str,
+    arguments: Vec<Value>,
+    span: Span,
+) -> RunResult<[Value; N]> {
+    <[Value; N]>::try_from(arguments).map_err(|arguments| {
         error(
             RuntimeErrorKind::WrongArgumentCount {
                 function: function.to_string(),
-                expected: 1,
+                expected: N,
                 found: arguments.len(),
             },
             span,
         )
-    })?;
-    Ok(value)
+    })
+}
+
+fn expect_text(value: Value, span: Span) -> RunResult<String> {
+    match value {
+        Value::Text(text) => Ok(text),
+        other => Err(error(
+            RuntimeErrorKind::TypeMismatch {
+                expected: "Text".to_string(),
+                found: other.type_name(),
+            },
+            span,
+        )),
+    }
 }
 
 fn error(kind: RuntimeErrorKind, span: Span) -> RuntimeError {
@@ -718,12 +752,12 @@ mod tests {
 
     fn output(body: &str) -> String {
         let mut output = Vec::new();
-        run(&program(body), Path::new("."), &mut output).unwrap();
+        run(&program(body), Path::new("script.slz"), &mut output).unwrap();
         String::from_utf8(output).unwrap()
     }
 
     fn runtime_error(body: &str) -> RuntimeErrorKind {
-        run(&program(body), Path::new("."), &mut Vec::new())
+        run(&program(body), Path::new("script.slz"), &mut Vec::new())
             .unwrap_err()
             .kind
     }
@@ -744,7 +778,7 @@ mod tests {
     fn run_in(folder: &Path, source: &str) -> Result<String, RuntimeErrorKind> {
         let program = parse(tokenize(source).unwrap()).unwrap();
         let mut output = Vec::new();
-        run(&program, folder, &mut output).map_err(|error| error.kind)?;
+        run(&program, &folder.join("script.slz"), &mut output).map_err(|error| error.kind)?;
         Ok(String::from_utf8(output).unwrap())
     }
 
@@ -755,9 +789,9 @@ mod tests {
         run_in(folder, &source)
     }
 
-    fn denied(path: &str) -> RuntimeErrorKind {
+    fn not_declared(access: &'static str, path: &str) -> RuntimeErrorKind {
         RuntimeErrorKind::PermissionDenied {
-            access: "read",
+            access,
             path: path.to_string(),
         }
     }
@@ -788,7 +822,11 @@ mod tests {
             "./data/missing/../../secret.txt",
             "../secret.txt",
         ] {
-            assert_eq!(read_in_data(&folder, path), Err(denied(path)), "{path}");
+            assert_eq!(
+                read_in_data(&folder, path),
+                Err(not_declared("read", path)),
+                "{path}"
+            );
         }
     }
 
@@ -814,8 +852,68 @@ mod tests {
         );
         assert_eq!(
             run_in(&folder, &source("./database.txt")),
-            Err(denied("./database.txt"))
+            Err(not_declared("read", "./database.txt"))
         );
+    }
+
+    fn write_in_out(folder: &Path, path: &str) -> Result<String, RuntimeErrorKind> {
+        std::fs::create_dir_all(folder.join("out")).unwrap();
+        let source = format!(
+            "permissions {{ write folder \"./out\"; write folder \".\"; }}\n\
+             check write_file(\"{path}\", \"written\");"
+        );
+        run_in(folder, &source)
+    }
+
+    #[test]
+    fn writes_inside_a_declared_folder() {
+        let folder = fixture("write");
+        std::fs::create_dir_all(folder.join("out")).unwrap();
+        let source = "permissions { write folder \"./out\"; }
+            check write_file(\"./out/report.txt\", \"total: 3\");";
+        assert_eq!(run_in(&folder, source), Ok(String::new()));
+        assert_eq!(
+            std::fs::read_to_string(folder.join("out/report.txt")).unwrap(),
+            "total: 3"
+        );
+        let outside = "permissions { write folder \"./out\"; }
+            check write_file(\"./out/../secret.txt\", \"x\");";
+        assert_eq!(
+            run_in(&folder, outside),
+            Err(not_declared("write", "./out/../secret.txt"))
+        );
+    }
+
+    #[test]
+    fn writing_does_not_allow_reading() {
+        let folder = fixture("write-read");
+        std::fs::create_dir_all(folder.join("out")).unwrap();
+        std::fs::write(folder.join("out/old.txt"), "old").unwrap();
+        let source = "permissions { write folder \"./out\"; }
+            print(check read_file(\"./out/old.txt\"));";
+        assert_eq!(
+            run_in(&folder, source),
+            Err(not_declared("read", "./out/old.txt"))
+        );
+    }
+
+    #[test]
+    fn some_places_can_never_be_written() {
+        let folder = fixture("protected");
+        for path in [
+            "./script.slz",
+            "./.git/hooks/pre-commit",
+            "./.bashrc",
+            "./out/../.zshrc",
+            "./Microsoft.PowerShell_profile.ps1",
+        ] {
+            let error = write_in_out(&folder, path).unwrap_err();
+            assert!(
+                matches!(error, RuntimeErrorKind::ProtectedPath { .. }),
+                "{path}: {error:?}"
+            );
+            assert!(error.is_permission_violation());
+        }
     }
 
     #[test]

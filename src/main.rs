@@ -32,11 +32,7 @@ fn main() -> ExitCode {
         Err(error) => return report(&path, &source, error.span, error.kind),
     };
 
-    let script_folder = Path::new(&path)
-        .parent()
-        .filter(|folder| !folder.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    match slarz::interpreter::run(&program, script_folder, &mut std::io::stdout().lock()) {
+    match slarz::interpreter::run(&program, Path::new(&path), &mut std::io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if error.kind.is_permission_violation() => {
             report(&path, &source, error.span, error.kind);
