@@ -1,0 +1,9 @@
+permissions { }
+
+var count: Int = 0;
+var total: Int = 0;
+while count < 4 {
+    count = count + 1;
+    total = total + count;
+}
+print(total);

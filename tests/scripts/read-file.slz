@@ -1,0 +1,6 @@
+permissions {
+    read folder "./data";
+}
+
+content: Text = check read_file("./data/notes.txt");
+print(content);

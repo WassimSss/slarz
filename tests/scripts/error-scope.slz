@@ -1,0 +1,6 @@
+permissions { }
+
+if true {
+    bonus: Int = 5;
+}
+print(bonus);

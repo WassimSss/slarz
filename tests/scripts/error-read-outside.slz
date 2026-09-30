@@ -1,0 +1,6 @@
+permissions {
+    read folder "./data";
+}
+
+// `..` climbs out of `data`: the real path is outside the permissions.
+secret: Text = check read_file("./data/../read-file.slz");

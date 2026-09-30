@@ -1,0 +1,1 @@
+error: error-read-outside.slz:6:22: permission denied: this script may not read `./data/../read-file.slz`, because its `permissions` block does not allow it

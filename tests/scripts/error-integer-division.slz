@@ -1,0 +1,3 @@
+permissions { }
+
+half: Int = 7 / 2;

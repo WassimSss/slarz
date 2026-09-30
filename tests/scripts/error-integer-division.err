@@ -1,0 +1,1 @@
+error: error-integer-division.slz:3:13: `/` only divides `Float` values, because languages disagree on what `7 / 2` means for integers: write `7.0 / 2.0`

@@ -1,0 +1,24 @@
+permissions { }
+
+// Called before its declaration: functions are known before the script runs.
+print(factorial(5));
+
+function factorial(n: Int) -> Int {
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+function first_over(limit: Int) -> Int {
+    var n: Int = 0;
+    while true {
+        n = n + 1;
+        if n > limit {
+            return n;
+        }
+    }
+    return 0;
+}
+
+print(first_over(3));

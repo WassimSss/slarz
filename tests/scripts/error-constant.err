@@ -1,0 +1,1 @@
+error: error-constant.slz:4:1: `rate` is a constant: declare it with `var` if it needs to change

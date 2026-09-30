@@ -1,0 +1,4 @@
+permissions { }
+
+rate: Float = 0.2;
+rate = 0.3;

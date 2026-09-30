@@ -1,0 +1,1 @@
+error: error-missing-colon.slz:3:3: expected `:` and a type after the variable name, found the name `Int`

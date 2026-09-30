@@ -1,0 +1,1 @@
+error: error-scope.slz:6:7: `bonus` is not defined: declare it first with `bonus: Type = value;`
