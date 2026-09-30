@@ -224,6 +224,9 @@ impl Parser {
                         span: start,
                     });
                 }
+                // Two names in a row (`x Int = 5;`): most likely a declaration
+                // missing its `:`, so let that rule report what it expected.
+                TokenKind::Identifier(_) => return self.declaration(start, false),
                 _ => {}
             }
         }
@@ -858,6 +861,10 @@ mod tests {
         assert_eq!(
             body_error("let x = 5;"),
             ParseErrorKind::ForeignKeyword("let".to_string())
+        );
+        assert_eq!(
+            body_error("x Int = 5;").to_string(),
+            "expected `:` and a type after the variable name, found the name `Int`"
         );
         assert_eq!(
             body_error("ok: Bool = 1 < 2 < 3;"),
