@@ -124,6 +124,10 @@ print(total);
 
 More in [`examples/`](examples/).
 
+## How the code is organized
+
+The code follows the interpreter's pipeline (lexer, parser, interpreter), with built-in functions and error messages in modules of their own. [ARCHITECTURE.md](ARCHITECTURE.md) maps every file, lists the invariants that keep scripts within their permissions, and explains how to add a built-in function, an error message or a piece of syntax.
+
 ## License
 
 Licensed under either of
