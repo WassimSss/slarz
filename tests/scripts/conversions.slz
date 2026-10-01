@@ -1,0 +1,16 @@
+permissions { }
+
+// Splitting a bill: whole euros per person, and what is left over.
+total: Int = 100;
+people: Int = 3;
+print("each pays " + to_text(quotient(total, people)) + ", " + to_text(remainder(total, people)) + " left");
+
+// Averages need decimals: converting is always written out.
+average: Float = to_float(total) / to_float(people);
+print("average: " + to_text(average));
+print("rounded: " + to_text(round(average)));
+
+// Text read from a file or an API may not be a number.
+count: Int = parse_int("12") otherwise 0;
+broken: Int = parse_int("twelve") otherwise 0;
+print(count + broken);

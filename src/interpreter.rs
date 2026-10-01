@@ -19,14 +19,27 @@ use crate::value::Value;
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
 
-const BUILTINS: [&str; 6] = [
+const BUILTINS: [&str; 15] = [
     "print",
     "length",
     "append",
     "read_file",
     "write_file",
     "list_folder",
+    "to_float",
+    "round",
+    "floor",
+    "ceil",
+    "to_text",
+    "parse_int",
+    "parse_float",
+    "quotient",
+    "remainder",
 ];
+
+/// Beyond 2^53, a `Float` cannot hold every whole number: `to_float` would
+/// silently change the value.
+const LARGEST_EXACT_FLOAT_INTEGER: i64 = 1 << 53;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeErrorKind {
@@ -51,6 +64,10 @@ pub enum RuntimeErrorKind {
     IntegerDivision,
     DivisionByZero,
     Overflow,
+    InexactConversion {
+        value: String,
+        target: &'static str,
+    },
     WrongArgumentCount {
         function: String,
         expected: usize,
@@ -136,10 +153,14 @@ impl fmt::Display for RuntimeErrorKind {
             Self::IntegerDivision => write!(
                 f,
                 "`/` only divides `Float` values, because languages disagree on what `7 / 2` \
-                 means for integers: write `7.0 / 2.0`"
+                 means for integers: write `quotient(7, 2)` for a whole number, or `7.0 / 2.0`"
             ),
             Self::DivisionByZero => write!(f, "division by zero"),
             Self::Overflow => write!(f, "integer overflow: the result does not fit in an `Int`"),
+            Self::InexactConversion { value, target } => write!(
+                f,
+                "`{value}` cannot be turned into a `{target}` without changing its value"
+            ),
             Self::WrongArgumentCount {
                 function,
                 expected,
@@ -618,6 +639,15 @@ impl<W: Write> Interpreter<'_, W> {
             "write_file" => return self.write_file(values, span),
             "list_folder" => return self.list_folder(values, span),
             "length" => return length(values, span),
+            "to_float" => return to_float(values, span),
+            "round" => return round_with("round", f64::round, values, span),
+            "floor" => return round_with("floor", f64::floor, values, span),
+            "ceil" => return round_with("ceil", f64::ceil, values, span),
+            "to_text" => return to_text(values, span),
+            "parse_int" => return parse_int(values, span),
+            "parse_float" => return parse_float(values, span),
+            "quotient" => return divide_integers("quotient", i64::checked_div, values, span),
+            "remainder" => return divide_integers("remainder", i64::checked_rem, values, span),
             "append" => {
                 let [list, item] = exact_arguments("append", values, span)?;
                 return append_item(list, item, span);
@@ -797,6 +827,100 @@ fn length(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
     Ok(Value::Integer(i64::try_from(length).unwrap_or(i64::MAX)))
 }
 
+fn to_float(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [value] = exact_arguments("to_float", arguments, span)?;
+    let integer = expect_integer(value, span)?;
+    if integer.unsigned_abs() > LARGEST_EXACT_FLOAT_INTEGER.unsigned_abs() {
+        return Err(inexact(integer.to_string(), "Float", span));
+    }
+    Ok(Value::Float(integer as f64))
+}
+
+// `round` rounds halves away from zero (2.5 gives 3), as taught at school,
+// not to the nearest even number like Python.
+fn round_with(
+    function: &str,
+    rounding: fn(f64) -> f64,
+    arguments: Vec<Value>,
+    span: Span,
+) -> RunResult<Value> {
+    let [value] = exact_arguments(function, arguments, span)?;
+    let float = expect_float(value, span)?;
+    let rounded = rounding(float);
+    // `i64::MAX as f64` is 2^63, one past the largest `Int`: hence the `<`.
+    if !(rounded >= i64::MIN as f64 && rounded < i64::MAX as f64) {
+        return Err(inexact(format!("{float:?}"), "Int", span));
+    }
+    Ok(Value::Integer(rounded as i64))
+}
+
+fn to_text(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [value] = exact_arguments("to_text", arguments, span)?;
+    match value {
+        Value::Integer(_) | Value::Float(_) | Value::Bool(_) => Ok(Value::Text(value.to_string())),
+        other => Err(type_mismatch("Int`, `Float` or `Bool", &other, span)),
+    }
+}
+
+fn parse_int(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [value] = exact_arguments("parse_int", arguments, span)?;
+    let text = expect_text(value, span)?;
+    let parsed = is_plain_number(&text, false)
+        .then(|| text.parse::<i64>().ok())
+        .flatten();
+    Ok(match parsed {
+        Some(integer) => Value::Success(Box::new(Value::Integer(integer))),
+        None => Value::Failure(format!(
+            "`{text}` is not a whole number that fits in an `Int`"
+        )),
+    })
+}
+
+fn parse_float(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [value] = exact_arguments("parse_float", arguments, span)?;
+    let text = expect_text(value, span)?;
+    let parsed = is_plain_number(&text, true)
+        .then(|| text.parse::<f64>().ok())
+        .flatten()
+        .filter(|float| float.is_finite());
+    Ok(match parsed {
+        Some(float) => Value::Success(Box::new(Value::Float(float))),
+        None => Value::Failure(format!("`{text}` is not a number like `42` or `3.14`")),
+    })
+}
+
+// Only digits, an optional leading `-` and, for decimals, one `.` with digits
+// on both sides. Rust's own parsing is more lenient (`+1`, `1e5`, `inf`): a
+// value read from a file should not be accepted in a shape the script never
+// planned for.
+fn is_plain_number(text: &str, allow_fraction: bool) -> bool {
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let all_digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    match unsigned.split_once('.') {
+        Some((whole, fraction)) => allow_fraction && all_digits(whole) && all_digits(fraction),
+        None => all_digits(unsigned),
+    }
+}
+
+// Both truncate toward zero, like C, Java, JavaScript, Rust and Go:
+// `quotient(-7, 2)` is -3 and `remainder(-7, 2)` is -1.
+fn divide_integers(
+    function: &str,
+    operation: fn(i64, i64) -> Option<i64>,
+    arguments: Vec<Value>,
+    span: Span,
+) -> RunResult<Value> {
+    let [left, right] = exact_arguments(function, arguments, span)?;
+    let left = expect_integer(left, span)?;
+    let right = expect_integer(right, span)?;
+    match operation(left, right) {
+        Some(result) => Ok(Value::Integer(result)),
+        None if right == 0 => Err(error(RuntimeErrorKind::DivisionByZero, span)),
+        // The only other case: `i64::MIN` divided by -1.
+        None => Err(error(RuntimeErrorKind::Overflow, span)),
+    }
+}
+
 fn append_item(list: Value, item: Value, span: Span) -> RunResult<Value> {
     let Value::List(mut items) = list else {
         return Err(error(
@@ -850,13 +974,21 @@ fn exact_arguments<const N: usize>(
 fn expect_text(value: Value, span: Span) -> RunResult<String> {
     match value {
         Value::Text(text) => Ok(text),
-        other => Err(error(
-            RuntimeErrorKind::TypeMismatch {
-                expected: "Text".to_string(),
-                found: other.type_name(),
-            },
-            span,
-        )),
+        other => Err(type_mismatch("Text", &other, span)),
+    }
+}
+
+fn expect_integer(value: Value, span: Span) -> RunResult<i64> {
+    match value {
+        Value::Integer(integer) => Ok(integer),
+        other => Err(type_mismatch("Int", &other, span)),
+    }
+}
+
+fn expect_float(value: Value, span: Span) -> RunResult<f64> {
+    match value {
+        Value::Float(float) => Ok(float),
+        other => Err(type_mismatch("Float", &other, span)),
     }
 }
 
@@ -864,14 +996,22 @@ fn error(kind: RuntimeErrorKind, span: Span) -> RuntimeError {
     RuntimeError { kind, span }
 }
 
-fn not_a_result(value: &Value, span: Span) -> RuntimeError {
+fn type_mismatch(expected: &str, found: &Value, span: Span) -> RuntimeError {
     error(
         RuntimeErrorKind::TypeMismatch {
-            expected: "Result".to_string(),
-            found: value.type_name(),
+            expected: expected.to_string(),
+            found: found.type_name(),
         },
         span,
     )
+}
+
+fn not_a_result(value: &Value, span: Span) -> RuntimeError {
+    type_mismatch("Result", value, span)
+}
+
+fn inexact(value: String, target: &'static str, span: Span) -> RuntimeError {
+    error(RuntimeErrorKind::InexactConversion { value, target }, span)
 }
 
 // Until the checker exists, types are checked while the script runs.
@@ -1254,6 +1394,71 @@ mod tests {
         assert_eq!(output("print(3.0);"), "3.0\n");
         assert_eq!(output("print(\"Hello, \" + \"world\");"), "Hello, world\n");
         assert_eq!(output("print(-(2 - 5));"), "3\n");
+    }
+
+    #[test]
+    fn number_conversions() {
+        assert_eq!(output("print(to_float(3));"), "3.0\n");
+        assert_eq!(output("print(round(2.5));"), "3\n");
+        assert_eq!(output("print(round(-2.5));"), "-3\n");
+        assert_eq!(output("print(floor(-2.5));"), "-3\n");
+        assert_eq!(output("print(ceil(2.1));"), "3\n");
+        assert_eq!(output("print(\"total: \" + to_text(3.0));"), "total: 3.0\n");
+        assert_eq!(output("print(to_text(true));"), "true\n");
+        assert_eq!(
+            runtime_error("x: Float = to_float(9007199254740993);"),
+            RuntimeErrorKind::InexactConversion {
+                value: "9007199254740993".to_string(),
+                target: "Float",
+            }
+        );
+        assert!(matches!(
+            runtime_error("x: Int = round(10000000000000000000.0);"),
+            RuntimeErrorKind::InexactConversion { target: "Int", .. }
+        ));
+        assert_eq!(
+            runtime_error("x: Int = round(3);"),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "Float".to_string(),
+                found: "Int",
+            }
+        );
+    }
+
+    #[test]
+    fn parsing_numbers_is_strict() {
+        assert_eq!(output("print(parse_int(\"-42\"));"), "Ok(-42)\n");
+        assert_eq!(output("print(parse_float(\"3.14\"));"), "Ok(3.14)\n");
+        assert_eq!(output("print(parse_float(\"42\"));"), "Ok(42.0)\n");
+        for rejected in [
+            "\" 42\"",
+            "\"+42\"",
+            "\"4.2\"",
+            "\"\"",
+            "\"99999999999999999999\"",
+        ] {
+            let body = format!("print(parse_int({rejected}) otherwise 0);");
+            assert_eq!(output(&body), "0\n", "parse_int({rejected})");
+        }
+        for rejected in ["\"1,5\"", "\"1e5\"", "\"inf\"", "\".5\"", "\"5.\"", "\"-\""] {
+            let body = format!("print(parse_float({rejected}) otherwise 0.0);");
+            assert_eq!(output(&body), "0.0\n", "parse_float({rejected})");
+        }
+    }
+
+    #[test]
+    fn integer_division_truncates_toward_zero() {
+        assert_eq!(output("print(quotient(7, 2));"), "3\n");
+        assert_eq!(output("print(quotient(-7, 2));"), "-3\n");
+        assert_eq!(output("print(remainder(-7, 2));"), "-1\n");
+        assert_eq!(
+            runtime_error("x: Int = remainder(7, 0);"),
+            RuntimeErrorKind::DivisionByZero
+        );
+        assert_eq!(
+            runtime_error("x: Int = quotient(-9223372036854775807 - 1, -1);"),
+            RuntimeErrorKind::Overflow
+        );
     }
 
     #[test]
