@@ -43,7 +43,6 @@ fn main() -> ExitCode {
 }
 
 fn report(path: &str, source: &str, span: Span, message: impl Display) -> ExitCode {
-    let (line, column) = span.line_column(source);
-    eprintln!("error: {path}:{line}:{column}: {message}");
+    eprintln!("{}", slarz::diagnostic::render(path, source, span, message));
     ExitCode::FAILURE
 }

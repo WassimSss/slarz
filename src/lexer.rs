@@ -1,6 +1,5 @@
 //! Turns source text into tokens.
 
-use std::fmt;
 use std::iter::Peekable;
 use std::str::CharIndices;
 
@@ -21,30 +20,6 @@ pub enum LexErrorKind {
 pub struct LexError {
     pub kind: LexErrorKind,
     pub span: Span,
-}
-
-impl fmt::Display for LexErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnexpectedCharacter(c) => write!(f, "unexpected character {c:?}"),
-            Self::UnterminatedText => {
-                write!(
-                    f,
-                    "text is not closed: add a `\"` before the end of the line"
-                )
-            }
-            Self::UnknownEscape(c) => {
-                write!(
-                    f,
-                    "unknown escape `\\{c}`: use `\\n`, `\\t`, `\\\"` or `\\\\`"
-                )
-            }
-            Self::LeadingZero => write!(f, "a number cannot start with 0: write `7`, not `07`"),
-            Self::NumberTooLarge => {
-                write!(f, "number is too large: integers go up to {}", i64::MAX)
-            }
-        }
-    }
 }
 
 /// Splits `source` into tokens. The last token is always `EndOfFile`.

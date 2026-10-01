@@ -1,8 +1,6 @@
 //! Builds the syntax tree from the tokens, with one function per grammar rule
 //! (a "recursive descent" parser).
 
-use std::fmt;
-
 use crate::ast::{
     BinaryOperator, Block, Expression, ExpressionKind, Function, HttpMethod, Parameter, PathAccess,
     Permission, PermissionKind, Program, Statement, StatementKind, Target, Type, UnaryOperator,
@@ -28,39 +26,6 @@ pub enum ParseErrorKind {
 pub struct ParseError {
     pub kind: ParseErrorKind,
     pub span: Span,
-}
-
-impl fmt::Display for ParseErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Expected { expected, found } => write!(f, "expected {expected}, found {found}"),
-            Self::Foreign(symbol) => write!(
-                f,
-                "`{}` is not Slarz: {}",
-                symbol.spelling(),
-                symbol.suggestion()
-            ),
-            Self::ForeignKeyword(word) if word == "let" || word == "const" => write!(
-                f,
-                "Slarz has no `{word}`: write `name: Type = value;` for a constant, \
-                 or `var name: Type = value;` for a variable"
-            ),
-            Self::ForeignKeyword(word) => {
-                write!(f, "functions are declared with `function`, not `{word}`")
-            }
-            Self::ChainedComparison => {
-                write!(f, "comparisons cannot be chained: write `a < b and b < c`")
-            }
-            Self::UnknownPermission(word) => write!(
-                f,
-                "unknown permission `{word}`: use `read`, `write`, `network` or `env`"
-            ),
-            Self::UnknownHttpMethod(method) => write!(
-                f,
-                "unknown HTTP method `{method}`: use GET, POST, PUT, PATCH or DELETE"
-            ),
-        }
-    }
 }
 
 type ParseResult<T> = Result<T, ParseError>;
