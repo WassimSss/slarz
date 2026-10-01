@@ -1,6 +1,7 @@
 //! Slarz: a scripting language designed for AI agents.
 
 pub mod ast;
+mod builtins;
 pub mod interpreter;
 pub mod json;
 pub mod lexer;

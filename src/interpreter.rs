@@ -11,8 +11,8 @@ use crate::ast::{
     BinaryOperator, Block, Expression, ExpressionKind, Function, Program, Statement, StatementKind,
     Type, UnaryOperator,
 };
-use crate::json::{self, Json};
-use crate::permissions::{Denial, Permissions};
+use crate::builtins::{self, Builtin, Context};
+use crate::permissions::Permissions;
 use crate::token::Span;
 use crate::value::Value;
 
@@ -20,61 +20,9 @@ use crate::value::Value;
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
 
-const BUILTINS: [&str; 41] = [
-    "print",
-    "length",
-    "append",
-    "get",
-    "read_file",
-    "write_file",
-    "list_folder",
-    "env",
-    "to_float",
-    "round",
-    "floor",
-    "ceil",
-    "to_text",
-    "parse_int",
-    "parse_float",
-    "quotient",
-    "remainder",
-    "contains",
-    "starts_with",
-    "ends_with",
-    "replace_all",
-    "split",
-    "join",
-    "lines",
-    "trim",
-    "to_upper",
-    "to_lower",
-    "format_decimals",
-    "parse_json",
-    "field",
-    "text_field",
-    "int_field",
-    "float_field",
-    "bool_field",
-    "as_text",
-    "as_int",
-    "as_float",
-    "as_bool",
-    "as_list",
-    "is_null",
-    "has_field",
-];
-
-/// Beyond 2^53, a `Float` cannot hold every whole number: `to_float` would
-/// silently change the value.
-const LARGEST_EXACT_FLOAT_INTEGER: i64 = 1 << 53;
-
 /// An absence has no reason of its own: the error points at the `check`.
 const NO_VALUE: &str = "`check` found no value here: give one with `otherwise`, or handle \
                         the absence with `if name: Type = ... { } else { }`";
-
-/// A `Float` holds about 17 significant digits: more decimals would only
-/// print noise.
-const MAX_DECIMALS: usize = 17;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeErrorKind {
@@ -247,7 +195,7 @@ impl fmt::Display for RuntimeErrorKind {
     }
 }
 
-type RunResult<T> = Result<T, RuntimeError>;
+pub(crate) type RunResult<T> = Result<T, RuntimeError>;
 
 /// Runs `program`, the content of the file at `script`, writing what it
 /// prints to `output`. Paths in the script are relative to its folder.
@@ -302,9 +250,7 @@ impl<W: Write> Interpreter<'_, W> {
     fn declare_functions(&mut self, statements: &[Statement]) -> RunResult<()> {
         for statement in statements {
             if let StatementKind::Function(function) = &statement.kind {
-                if BUILTINS.contains(&function.name.as_str())
-                    || self.functions.contains_key(&function.name)
-                {
+                if builtins::exists(&function.name) || self.functions.contains_key(&function.name) {
                     return Err(error(
                         RuntimeErrorKind::AlreadyDeclared(function.name.clone()),
                         statement.span,
@@ -563,7 +509,7 @@ impl<W: Write> Interpreter<'_, W> {
             return Ok(None);
         };
         let list = std::mem::replace(&mut variable.value, Value::Nothing);
-        append_item(list, item, value.span).map(Some)
+        builtins::append_item(list, item, value.span).map(Some)
     }
 
     fn calls_script_function(&self, expression: &Expression) -> bool {
@@ -697,68 +643,38 @@ impl<W: Write> Interpreter<'_, W> {
     }
 
     fn call(&mut self, name: &str, arguments: &[Expression], span: Span) -> RunResult<Value> {
-        // `env` looks at how its argument is written, so it runs before
-        // the arguments are evaluated.
-        if name == "env" {
-            return self.env(arguments, span);
-        }
-        let mut values = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            values.push(self.evaluate(argument)?);
-        }
-        match name {
-            "print" => return self.print(values, span),
-            "read_file" => return self.read_file(values, span),
-            "write_file" => return self.write_file(values, span),
-            "list_folder" => return self.list_folder(values, span),
-            "length" => return length(values, span),
-            "get" => return get(values, span),
-            "to_float" => return to_float(values, span),
-            "round" => return round_with("round", f64::round, values, span),
-            "floor" => return round_with("floor", f64::floor, values, span),
-            "ceil" => return round_with("ceil", f64::ceil, values, span),
-            "to_text" => return to_text(values, span),
-            "parse_int" => return parse_int(values, span),
-            "parse_float" => return parse_float(values, span),
-            "quotient" => return divide_integers("quotient", i64::checked_div, values, span),
-            "remainder" => return divide_integers("remainder", i64::checked_rem, values, span),
-            "contains" => return test_text("contains", |t, part| t.contains(part), values, span),
-            "starts_with" => {
-                return test_text("starts_with", |t, start| t.starts_with(start), values, span);
+        match builtins::find(name) {
+            Some(Builtin::Quoted(function)) => return function(&self.context(), arguments, span),
+            Some(Builtin::Pure(function)) => {
+                let values = self.evaluate_all(arguments)?;
+                return function(values, span);
             }
-            "ends_with" => return test_text("ends_with", |t, end| t.ends_with(end), values, span),
-            "replace_all" => return replace_all(values, span),
-            "split" => return split(values, span),
-            "join" => return join(values, span),
-            "lines" => return lines(values, span),
-            "trim" => return transform_text("trim", |t| t.trim().to_string(), values, span),
-            "to_upper" => return transform_text("to_upper", str::to_uppercase, values, span),
-            "to_lower" => return transform_text("to_lower", str::to_lowercase, values, span),
-            "format_decimals" => return format_decimals(values, span),
-            "parse_json" => return parse_json(values, span),
-            "field" => return read_field("field", JsonTarget::Json, values, span),
-            "text_field" => return read_field("text_field", JsonTarget::Text, values, span),
-            "int_field" => return read_field("int_field", JsonTarget::Int, values, span),
-            "float_field" => return read_field("float_field", JsonTarget::Float, values, span),
-            "bool_field" => return read_field("bool_field", JsonTarget::Bool, values, span),
-            "as_text" => return read_as("as_text", JsonTarget::Text, values, span),
-            "as_int" => return read_as("as_int", JsonTarget::Int, values, span),
-            "as_float" => return read_as("as_float", JsonTarget::Float, values, span),
-            "as_bool" => return read_as("as_bool", JsonTarget::Bool, values, span),
-            "as_list" => return read_as("as_list", JsonTarget::List, values, span),
-            "is_null" => return is_null(values, span),
-            "has_field" => return has_field(values, span),
-            "append" => {
-                let [list, item] = exact_arguments("append", values, span)?;
-                return append_item(list, item, span);
+            Some(Builtin::Io(function)) => {
+                let values = self.evaluate_all(arguments)?;
+                return function(&mut self.context(), values, span);
             }
-            _ => {}
+            None => {}
         }
+        let values = self.evaluate_all(arguments)?;
         let function =
             self.functions.get(name).cloned().ok_or_else(|| {
                 error(RuntimeErrorKind::UndefinedFunction(name.to_string()), span)
             })?;
         self.call_function(&function, values, span)
+    }
+
+    fn evaluate_all(&mut self, expressions: &[Expression]) -> RunResult<Vec<Value>> {
+        expressions
+            .iter()
+            .map(|expression| self.evaluate(expression))
+            .collect()
+    }
+
+    fn context(&mut self) -> Context<'_> {
+        Context {
+            output: &mut *self.output,
+            permissions: &self.permissions,
+        }
     }
 
     fn call_function(
@@ -836,565 +752,13 @@ impl<W: Write> Interpreter<'_, W> {
             )),
         }
     }
-
-    // ----- Built-in functions -----
-
-    fn print(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-        let [value] = exact_arguments("print", arguments, span)?;
-        writeln!(self.output, "{value}")
-            .map_err(|_| error(RuntimeErrorKind::OutputFailed, span))?;
-        Ok(Value::Nothing)
-    }
-
-    // Permissions are checked before the disk is touched: a denied path is
-    // never even looked at.
-    fn read_file(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-        let [path] = exact_arguments("read_file", arguments, span)?;
-        let path = expect_text(path, span)?;
-        let real_path = self
-            .permissions
-            .resolve_read(&path)
-            .map_err(|denial| error(denied("read", path.clone(), denial), span))?;
-        Ok(match std::fs::read_to_string(real_path) {
-            Ok(content) => Value::Success(Box::new(Value::Text(content))),
-            Err(reason) => Value::Failure(format!("cannot read `{path}`: {reason}")),
-        })
-    }
-
-    // Paths come back as the script would write them (`./invoices/a.pdf`), in
-    // alphabetical order so the result is the same on every system; folders
-    // end with `/`.
-    fn list_folder(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-        let [path] = exact_arguments("list_folder", arguments, span)?;
-        let path = expect_text(path, span)?;
-        let real_path = self
-            .permissions
-            .resolve_read(&path)
-            .map_err(|denial| error(denied("read", path.clone(), denial), span))?;
-        let failure =
-            |reason: std::io::Error| Value::Failure(format!("cannot list `{path}`: {reason}"));
-        let entries = match std::fs::read_dir(real_path) {
-            Ok(entries) => entries,
-            Err(reason) => return Ok(failure(reason)),
-        };
-        let prefix = path.trim_end_matches('/');
-        let mut paths = Vec::new();
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(reason) => return Ok(failure(reason)),
-            };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
-            let suffix = if is_folder { "/" } else { "" };
-            paths.push(format!("{prefix}/{name}{suffix}"));
-        }
-        paths.sort();
-        let list = paths.into_iter().map(Value::Text).collect();
-        Ok(Value::Success(Box::new(Value::List(Rc::new(list)))))
-    }
-
-    // The name must be written in quotes: a computed name would let outside
-    // data (an API response, a file) pick which secret to read.
-    fn env(&self, arguments: &[Expression], span: Span) -> RunResult<Value> {
-        let [argument] = arguments else {
-            return Err(error(
-                RuntimeErrorKind::WrongArgumentCount {
-                    function: "env".to_string(),
-                    expected: 1,
-                    found: arguments.len(),
-                },
-                span,
-            ));
-        };
-        let ExpressionKind::Text(name) = &argument.kind else {
-            return Err(invalid_argument(
-                "env",
-                "the variable name must be written in quotes, like `env(\"GITHUB_TOKEN\")`, \
-                 so that anyone reading the script sees which secrets it reads",
-                argument.span,
-            ));
-        };
-        if !self.permissions.allows_env(name) {
-            return Err(error(
-                RuntimeErrorKind::PermissionDenied {
-                    access: "read the environment variable",
-                    path: name.clone(),
-                },
-                span,
-            ));
-        }
-        match std::env::var(name) {
-            Ok(value) => Ok(Value::Present(Box::new(Value::Text(value)))),
-            Err(std::env::VarError::NotPresent) => Ok(Value::Absent),
-            // Saying "absent" would be false: the variable exists.
-            Err(std::env::VarError::NotUnicode(_)) => Err(invalid_argument(
-                "env",
-                &format!("`{name}` is defined but does not hold valid text"),
-                span,
-            )),
-        }
-    }
-
-    fn write_file(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-        let [path, content] = exact_arguments("write_file", arguments, span)?;
-        let path = expect_text(path, span)?;
-        let content = expect_text(content, span)?;
-        let real_path = self
-            .permissions
-            .resolve_write(&path)
-            .map_err(|denial| error(denied("write", path.clone(), denial), span))?;
-        Ok(match std::fs::write(real_path, content) {
-            Ok(()) => Value::Success(Box::new(Value::Nothing)),
-            Err(reason) => Value::Failure(format!("cannot write `{path}`: {reason}")),
-        })
-    }
 }
 
-fn length(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [value] = exact_arguments("length", arguments, span)?;
-    let length = match &value {
-        Value::List(items) => items.len(),
-        Value::Text(text) => text.chars().count(),
-        other => {
-            return Err(error(
-                RuntimeErrorKind::TypeMismatch {
-                    expected: "List` or `Text".to_string(),
-                    found: other.type_name(),
-                },
-                span,
-            ));
-        }
-    };
-    Ok(Value::Integer(i64::try_from(length).unwrap_or(i64::MAX)))
-}
-
-// Positions start at 0. A negative one is a bug, not an absence: in Python,
-// `items[-1]` is the last item, and a script expecting that must not quietly
-// get nothing.
-fn get(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [list, index] = exact_arguments("get", arguments, span)?;
-    let Value::List(items) = list else {
-        return Err(type_mismatch("List", &list, span));
-    };
-    let index = expect_integer(index, span)?;
-    let Ok(index) = usize::try_from(index) else {
-        return Err(invalid_argument(
-            "get",
-            "positions start at 0 and cannot be negative (there is no `-1` for the last item)",
-            span,
-        ));
-    };
-    Ok(match items.get(index) {
-        Some(item) => Value::Present(Box::new(item.clone())),
-        None => Value::Absent,
-    })
-}
-
-fn to_float(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [value] = exact_arguments("to_float", arguments, span)?;
-    let integer = expect_integer(value, span)?;
-    if integer.unsigned_abs() > LARGEST_EXACT_FLOAT_INTEGER.unsigned_abs() {
-        return Err(inexact(integer.to_string(), "Float", span));
-    }
-    Ok(Value::Float(integer as f64))
-}
-
-// `round` rounds halves away from zero (2.5 gives 3), as taught at school,
-// not to the nearest even number like Python.
-fn round_with(
-    function: &str,
-    rounding: fn(f64) -> f64,
-    arguments: Vec<Value>,
-    span: Span,
-) -> RunResult<Value> {
-    let [value] = exact_arguments(function, arguments, span)?;
-    let float = expect_float(value, span)?;
-    let rounded = rounding(float);
-    // `i64::MAX as f64` is 2^63, one past the largest `Int`: hence the `<`.
-    if !(rounded >= i64::MIN as f64 && rounded < i64::MAX as f64) {
-        return Err(inexact(format!("{float:?}"), "Int", span));
-    }
-    Ok(Value::Integer(rounded as i64))
-}
-
-fn to_text(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [value] = exact_arguments("to_text", arguments, span)?;
-    match value {
-        Value::Integer(_) | Value::Float(_) | Value::Bool(_) => Ok(Value::Text(value.to_string())),
-        other => Err(type_mismatch("Int`, `Float` or `Bool", &other, span)),
-    }
-}
-
-fn parse_int(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [value] = exact_arguments("parse_int", arguments, span)?;
-    let text = expect_text(value, span)?;
-    let parsed = is_plain_number(&text, false)
-        .then(|| text.parse::<i64>().ok())
-        .flatten();
-    Ok(match parsed {
-        Some(integer) => Value::Success(Box::new(Value::Integer(integer))),
-        None => Value::Failure(format!(
-            "`{text}` is not a whole number that fits in an `Int`"
-        )),
-    })
-}
-
-fn parse_float(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [value] = exact_arguments("parse_float", arguments, span)?;
-    let text = expect_text(value, span)?;
-    let parsed = is_plain_number(&text, true)
-        .then(|| text.parse::<f64>().ok())
-        .flatten()
-        .filter(|float| float.is_finite());
-    Ok(match parsed {
-        Some(float) => Value::Success(Box::new(Value::Float(float))),
-        None => Value::Failure(format!("`{text}` is not a number like `42` or `3.14`")),
-    })
-}
-
-// Only digits, an optional leading `-` and, for decimals, one `.` with digits
-// on both sides. Rust's own parsing is more lenient (`+1`, `1e5`, `inf`): a
-// value read from a file should not be accepted in a shape the script never
-// planned for.
-fn is_plain_number(text: &str, allow_fraction: bool) -> bool {
-    let unsigned = text.strip_prefix('-').unwrap_or(text);
-    let all_digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
-    match unsigned.split_once('.') {
-        Some((whole, fraction)) => allow_fraction && all_digits(whole) && all_digits(fraction),
-        None => all_digits(unsigned),
-    }
-}
-
-// Both truncate toward zero, like C, Java, JavaScript, Rust and Go:
-// `quotient(-7, 2)` is -3 and `remainder(-7, 2)` is -1.
-fn divide_integers(
-    function: &str,
-    operation: fn(i64, i64) -> Option<i64>,
-    arguments: Vec<Value>,
-    span: Span,
-) -> RunResult<Value> {
-    let [left, right] = exact_arguments(function, arguments, span)?;
-    let left = expect_integer(left, span)?;
-    let right = expect_integer(right, span)?;
-    match operation(left, right) {
-        Some(result) => Ok(Value::Integer(result)),
-        None if right == 0 => Err(error(RuntimeErrorKind::DivisionByZero, span)),
-        // The only other case: `i64::MIN` divided by -1.
-        None => Err(error(RuntimeErrorKind::Overflow, span)),
-    }
-}
-
-fn test_text(
-    function: &str,
-    test: fn(&str, &str) -> bool,
-    arguments: Vec<Value>,
-    span: Span,
-) -> RunResult<Value> {
-    let [text, part] = exact_arguments(function, arguments, span)?;
-    let text = expect_text(text, span)?;
-    let part = expect_text(part, span)?;
-    Ok(Value::Bool(test(&text, &part)))
-}
-
-fn transform_text(
-    function: &str,
-    transform: fn(&str) -> String,
-    arguments: Vec<Value>,
-    span: Span,
-) -> RunResult<Value> {
-    let [text] = exact_arguments(function, arguments, span)?;
-    Ok(Value::Text(transform(&expect_text(text, span)?)))
-}
-
-fn replace_all(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [text, old, new] = exact_arguments("replace_all", arguments, span)?;
-    let text = expect_text(text, span)?;
-    let old = expect_text(old, span)?;
-    let new = expect_text(new, span)?;
-    if old.is_empty() {
-        return Err(invalid_argument(
-            "replace_all",
-            "the text to replace cannot be empty",
-            span,
-        ));
-    }
-    Ok(Value::Text(text.replace(&old, &new)))
-}
-
-// Empty pieces are kept: in `"a,,b"`, the empty column is still a column.
-fn split(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [text, separator] = exact_arguments("split", arguments, span)?;
-    let text = expect_text(text, span)?;
-    let separator = expect_text(separator, span)?;
-    if separator.is_empty() {
-        return Err(invalid_argument(
-            "split",
-            "the separator cannot be empty",
-            span,
-        ));
-    }
-    Ok(text_list(text.split(separator.as_str())))
-}
-
-fn join(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [list, separator] = exact_arguments("join", arguments, span)?;
-    let Value::List(items) = list else {
-        return Err(type_mismatch("List<Text>", &list, span));
-    };
-    let separator = expect_text(separator, span)?;
-    let mut texts = Vec::with_capacity(items.len());
-    for item in items.iter() {
-        match item {
-            Value::Text(text) => texts.push(text.as_str()),
-            other => return Err(type_mismatch("Text", other, span)),
-        }
-    }
-    Ok(Value::Text(texts.join(&separator)))
-}
-
-// `str::lines` accepts both `\n` and `\r\n`, so a file saved on Windows gives
-// the same lines everywhere.
-fn lines(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [text] = exact_arguments("lines", arguments, span)?;
-    Ok(text_list(expect_text(text, span)?.lines()))
-}
-
-// Halves are rounded away from zero, like `round`: Rust's own formatting
-// would round them to even (2.5 to "2"). Values that are not exact in binary
-// keep their trap: 1.005 * 100 is 100.49999999999999, so 1.005 gives "1.00".
-// Amounts of money belong in `Int` cents, not in `Float`.
-fn format_decimals(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [number, decimals] = exact_arguments("format_decimals", arguments, span)?;
-    let number = expect_float(number, span)?;
-    let decimals = expect_integer(decimals, span)?;
-    // A negative count fails `try_from`.
-    let Some(decimals) = usize::try_from(decimals)
-        .ok()
-        .filter(|&decimals| decimals <= MAX_DECIMALS)
-    else {
-        return Err(invalid_argument(
-            "format_decimals",
-            &format!("the number of decimals must be between 0 and {MAX_DECIMALS}"),
-            span,
-        ));
-    };
-    let factor = 10_f64.powi(decimals as i32);
-    let rounded = (number * factor).round() / factor;
-    // Huge numbers overflow once scaled, but they have no decimals to round.
-    let rounded = if rounded.is_finite() { rounded } else { number };
-    Ok(Value::Text(format!("{rounded:.decimals$}")))
-}
-
-#[derive(Debug, Clone, Copy)]
-enum JsonTarget {
-    Json,
-    Text,
-    Int,
-    Float,
-    Bool,
-    List,
-}
-
-fn parse_json(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [text] = exact_arguments("parse_json", arguments, span)?;
-    let text = expect_text(text, span)?;
-    Ok(result_value(
-        json::parse(&text)
-            .map(|parsed| Value::Json(Rc::new(parsed)))
-            .map_err(|error| error.to_string()),
-    ))
-}
-
-fn read_field(
-    function: &str,
-    target: JsonTarget,
-    arguments: Vec<Value>,
-    span: Span,
-) -> RunResult<Value> {
-    let [json, key] = exact_arguments(function, arguments, span)?;
-    let json = expect_json(json, span)?;
-    let key = expect_text(key, span)?;
-    let found = match &*json {
-        Json::Object(_) => json
-            .field(&key)
-            .ok_or_else(|| format!("there is no field `{key}`")),
-        other => Err(format!(
-            "cannot read field `{key}`: the value is {}, not an object",
-            other.kind()
-        )),
-    };
-    Ok(result_value(found.and_then(|value| {
-        convert_json(value, target).map_err(|problem| format!("field `{key}` {problem}"))
-    })))
-}
-
-fn read_as(
-    function: &str,
-    target: JsonTarget,
-    arguments: Vec<Value>,
-    span: Span,
-) -> RunResult<Value> {
-    let [json] = exact_arguments(function, arguments, span)?;
-    let json = expect_json(json, span)?;
-    Ok(result_value(
-        convert_json(&json, target).map_err(|problem| format!("the value {problem}")),
-    ))
-}
-
-// Messages say what kind of value was found, never the value itself: they
-// end up in logs, and the value may be private.
-fn convert_json(json: &Json, target: JsonTarget) -> Result<Value, String> {
-    let converted = match (target, json) {
-        (JsonTarget::Json, json) => Some(Value::Json(Rc::new(json.clone()))),
-        (JsonTarget::Text, Json::Text(text)) => Some(Value::Text(text.clone())),
-        (JsonTarget::Bool, Json::Bool(value)) => Some(Value::Bool(*value)),
-        (JsonTarget::Int, Json::Number(number)) => {
-            if !is_plain_number(number, false) {
-                return Err("is a number but not a whole one: read it as a `Float`".to_string());
-            }
-            let integer = number
-                .parse()
-                .map_err(|_| "is a whole number too large for an `Int`".to_string())?;
-            Some(Value::Integer(integer))
-        }
-        (JsonTarget::Float, Json::Number(number)) => {
-            let float = number
-                .parse::<f64>()
-                .ok()
-                .filter(|float| float.is_finite())
-                .ok_or_else(|| "is a number too large for a `Float`".to_string())?;
-            Some(Value::Float(float))
-        }
-        (JsonTarget::List, Json::List(items)) => {
-            let items = items
-                .iter()
-                .map(|item| Value::Json(Rc::new(item.clone())))
-                .collect();
-            Some(Value::List(Rc::new(items)))
-        }
-        _ => None,
-    };
-    converted.ok_or_else(|| format!("is {}, not {}", json.kind(), target_name(target)))
-}
-
-fn target_name(target: JsonTarget) -> &'static str {
-    match target {
-        JsonTarget::Json => "a JSON value",
-        JsonTarget::Text => "a text",
-        JsonTarget::Int | JsonTarget::Float => "a number",
-        JsonTarget::Bool => "a boolean",
-        JsonTarget::List => "a list",
-    }
-}
-
-fn is_null(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [json] = exact_arguments("is_null", arguments, span)?;
-    Ok(Value::Bool(*expect_json(json, span)? == Json::Null))
-}
-
-fn has_field(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
-    let [json, key] = exact_arguments("has_field", arguments, span)?;
-    let json = expect_json(json, span)?;
-    let key = expect_text(key, span)?;
-    Ok(Value::Bool(json.field(&key).is_some()))
-}
-
-fn result_value(result: Result<Value, String>) -> Value {
-    match result {
-        Ok(value) => Value::Success(Box::new(value)),
-        Err(message) => Value::Failure(message),
-    }
-}
-
-fn text_list<'a>(pieces: impl Iterator<Item = &'a str>) -> Value {
-    let list = pieces.map(|piece| Value::Text(piece.to_string())).collect();
-    Value::List(Rc::new(list))
-}
-
-fn append_item(list: Value, item: Value, span: Span) -> RunResult<Value> {
-    let Value::List(mut items) = list else {
-        return Err(error(
-            RuntimeErrorKind::TypeMismatch {
-                expected: "List".to_string(),
-                found: list.type_name(),
-            },
-            span,
-        ));
-    };
-    if let Some(first) = items.first() {
-        if first.type_name() != item.type_name() {
-            return Err(error(
-                RuntimeErrorKind::TypeMismatch {
-                    expected: first.type_name().to_string(),
-                    found: item.type_name(),
-                },
-                span,
-            ));
-        }
-    }
-    // Copies the list only if another variable still shares it.
-    Rc::make_mut(&mut items).push(item);
-    Ok(Value::List(items))
-}
-
-fn denied(access: &'static str, path: String, denial: Denial) -> RuntimeErrorKind {
-    match denial {
-        Denial::NotDeclared => RuntimeErrorKind::PermissionDenied { access, path },
-        Denial::Protected(reason) => RuntimeErrorKind::ProtectedPath { path, reason },
-    }
-}
-
-fn exact_arguments<const N: usize>(
-    function: &str,
-    arguments: Vec<Value>,
-    span: Span,
-) -> RunResult<[Value; N]> {
-    <[Value; N]>::try_from(arguments).map_err(|arguments| {
-        error(
-            RuntimeErrorKind::WrongArgumentCount {
-                function: function.to_string(),
-                expected: N,
-                found: arguments.len(),
-            },
-            span,
-        )
-    })
-}
-
-fn expect_text(value: Value, span: Span) -> RunResult<String> {
-    match value {
-        Value::Text(text) => Ok(text),
-        other => Err(type_mismatch("Text", &other, span)),
-    }
-}
-
-fn expect_integer(value: Value, span: Span) -> RunResult<i64> {
-    match value {
-        Value::Integer(integer) => Ok(integer),
-        other => Err(type_mismatch("Int", &other, span)),
-    }
-}
-
-fn expect_json(value: Value, span: Span) -> RunResult<Rc<Json>> {
-    match value {
-        Value::Json(json) => Ok(json),
-        other => Err(type_mismatch("Json", &other, span)),
-    }
-}
-
-fn expect_float(value: Value, span: Span) -> RunResult<f64> {
-    match value {
-        Value::Float(float) => Ok(float),
-        other => Err(type_mismatch("Float", &other, span)),
-    }
-}
-
-fn error(kind: RuntimeErrorKind, span: Span) -> RuntimeError {
+pub(crate) fn error(kind: RuntimeErrorKind, span: Span) -> RuntimeError {
     RuntimeError { kind, span }
 }
 
-fn type_mismatch(expected: &str, found: &Value, span: Span) -> RuntimeError {
+pub(crate) fn type_mismatch(expected: &str, found: &Value, span: Span) -> RuntimeError {
     error(
         RuntimeErrorKind::TypeMismatch {
             expected: expected.to_string(),
@@ -1406,15 +770,6 @@ fn type_mismatch(expected: &str, found: &Value, span: Span) -> RuntimeError {
 
 fn not_optional_or_result(value: &Value, span: Span) -> RuntimeError {
     type_mismatch("Optional` or `Result", value, span)
-}
-
-fn inexact(value: String, target: &'static str, span: Span) -> RuntimeError {
-    error(RuntimeErrorKind::InexactConversion { value, target }, span)
-}
-
-fn invalid_argument(function: &'static str, reason: &str, span: Span) -> RuntimeError {
-    let reason = reason.to_string();
-    error(RuntimeErrorKind::InvalidArgument { function, reason }, span)
 }
 
 // Until the checker exists, types are checked while the script runs.
