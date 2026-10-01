@@ -2,6 +2,7 @@
 
 pub mod ast;
 pub mod interpreter;
+pub mod json;
 pub mod lexer;
 pub mod parser;
 pub mod permissions;
