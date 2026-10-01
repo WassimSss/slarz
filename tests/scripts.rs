@@ -10,6 +10,9 @@
 //!
 //! Adding a test means adding a script and its expected files: no Rust needed.
 
+// The whole file is test code: stopping on the spot is the point.
+#![allow(clippy::unwrap_used)]
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;

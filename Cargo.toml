@@ -7,3 +7,14 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/WassimSss/slarz"
 
 [dependencies]
+
+# A language that promises safety must not be able to step outside Rust's
+# guarantees, nor crash on an unexpected value: these rules are checked on
+# every build, not only written down.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
