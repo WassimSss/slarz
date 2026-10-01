@@ -1,0 +1,1 @@
+error: error-check-absent.slz:4:15: `check` found no value here: give one with `otherwise`, or handle the absence with `if name: Type = ... { } else { }`

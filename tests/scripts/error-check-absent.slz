@@ -1,0 +1,4 @@
+permissions { }
+
+columns: List<Text> = ["Ada", "12.5"];
+email: Text = check get(columns, 2);

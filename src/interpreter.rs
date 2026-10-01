@@ -19,10 +19,11 @@ use crate::value::Value;
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
 
-const BUILTINS: [&str; 26] = [
+const BUILTINS: [&str; 27] = [
     "print",
     "length",
     "append",
+    "get",
     "read_file",
     "write_file",
     "list_folder",
@@ -51,6 +52,10 @@ const BUILTINS: [&str; 26] = [
 /// Beyond 2^53, a `Float` cannot hold every whole number: `to_float` would
 /// silently change the value.
 const LARGEST_EXACT_FLOAT_INTEGER: i64 = 1 << 53;
+
+/// An absence has no reason of its own: the error points at the `check`.
+const NO_VALUE: &str = "`check` found no value here: give one with `otherwise`, or handle \
+                        the absence with `if name: Type = ... { } else { }`";
 
 /// A `Float` holds about 17 significant digits: more decimals would only
 /// print noise.
@@ -157,7 +162,7 @@ impl fmt::Display for RuntimeErrorKind {
             Self::UnknownType(name) => write!(
                 f,
                 "unknown type `{name}`: the available types are `Int`, `Float`, `Text`, `Bool`, \
-                 `List<T>` and `Result<T, Error>`"
+                 `List<T>`, `Optional<T>` and `Result<T, Error>`"
             ),
             Self::InvalidOperands {
                 operator,
@@ -342,6 +347,32 @@ impl<W: Write> Interpreter<'_, W> {
                 if let Some(block) = else_block {
                     return self.execute_block(block);
                 }
+            }
+            StatementKind::IfPresent {
+                name,
+                declared_type,
+                value,
+                then_block,
+                else_block,
+            } => {
+                let inner = match self.evaluate(value)? {
+                    Value::Present(inner) | Value::Success(inner) => *inner,
+                    Value::Absent | Value::Failure(_) => {
+                        return match else_block {
+                            Some(block) => self.execute_block(block),
+                            None => Ok(Flow::Continue),
+                        };
+                    }
+                    other => return Err(type_mismatch("Optional` or `Result", &other, value.span)),
+                };
+                check_type(&inner, declared_type, span)?;
+                // `name` only exists inside the first block.
+                self.scopes.push(Scope::new());
+                let flow = self
+                    .declare(name, inner, false, Some(declared_type.clone()), span)
+                    .and_then(|()| self.execute_statements(then_block));
+                self.scopes.pop();
+                return flow;
             }
             StatementKind::While { condition, body } => {
                 while self.condition(condition)? {
@@ -625,9 +656,10 @@ impl<W: Write> Interpreter<'_, W> {
                 arguments,
             } => self.call(function, arguments, span),
             ExpressionKind::Check(inner) => match self.evaluate(inner)? {
-                Value::Success(value) => Ok(*value),
+                Value::Success(value) | Value::Present(value) => Ok(*value),
                 Value::Failure(message) => Err(error(RuntimeErrorKind::Failed(message), span)),
-                other => Err(not_a_result(&other, inner.span)),
+                Value::Absent => Err(error(RuntimeErrorKind::Failed(NO_VALUE.to_string()), span)),
+                other => Err(not_optional_or_result(&other, inner.span)),
             },
             ExpressionKind::If {
                 condition,
@@ -642,9 +674,9 @@ impl<W: Write> Interpreter<'_, W> {
                 self.evaluate(chosen)
             }
             ExpressionKind::Otherwise { value, fallback } => match self.evaluate(value)? {
-                Value::Success(value) => Ok(*value),
-                Value::Failure(_) => self.evaluate(fallback),
-                other => Err(not_a_result(&other, value.span)),
+                Value::Success(value) | Value::Present(value) => Ok(*value),
+                Value::Failure(_) | Value::Absent => self.evaluate(fallback),
+                other => Err(not_optional_or_result(&other, value.span)),
             },
         }
     }
@@ -660,6 +692,7 @@ impl<W: Write> Interpreter<'_, W> {
             "write_file" => return self.write_file(values, span),
             "list_folder" => return self.list_folder(values, span),
             "length" => return length(values, span),
+            "get" => return get(values, span),
             "to_float" => return to_float(values, span),
             "round" => return round_with("round", f64::round, values, span),
             "floor" => return round_with("floor", f64::floor, values, span),
@@ -859,6 +892,28 @@ fn length(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
         }
     };
     Ok(Value::Integer(i64::try_from(length).unwrap_or(i64::MAX)))
+}
+
+// Positions start at 0. A negative one is a bug, not an absence: in Python,
+// `items[-1]` is the last item, and a script expecting that must not quietly
+// get nothing.
+fn get(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [list, index] = exact_arguments("get", arguments, span)?;
+    let Value::List(items) = list else {
+        return Err(type_mismatch("List", &list, span));
+    };
+    let index = expect_integer(index, span)?;
+    let Ok(index) = usize::try_from(index) else {
+        return Err(invalid_argument(
+            "get",
+            "positions start at 0 and cannot be negative (there is no `-1` for the last item)",
+            span,
+        ));
+    };
+    Ok(match items.get(index) {
+        Some(item) => Value::Present(Box::new(item.clone())),
+        None => Value::Absent,
+    })
 }
 
 fn to_float(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
@@ -1146,8 +1201,8 @@ fn type_mismatch(expected: &str, found: &Value, span: Span) -> RuntimeError {
     )
 }
 
-fn not_a_result(value: &Value, span: Span) -> RuntimeError {
-    type_mismatch("Result", value, span)
+fn not_optional_or_result(value: &Value, span: Span) -> RuntimeError {
+    type_mismatch("Optional` or `Result", value, span)
 }
 
 fn inexact(value: String, target: &'static str, span: Span) -> RuntimeError {
@@ -1181,6 +1236,11 @@ fn conforms(value: &Value, declared: &Type) -> RunResult<bool> {
             Value::List(items) => items
                 .first()
                 .map_or(Ok(true), |first| conforms(first, element)),
+            _ => Ok(false),
+        },
+        ("Optional", [inner]) => match value {
+            Value::Present(value) => conforms(value, inner),
+            Value::Absent => Ok(true),
             _ => Ok(false),
         },
         ("Result", [success, failure])
@@ -1498,7 +1558,7 @@ mod tests {
         assert_eq!(
             runtime_error("x: Int = check 5;"),
             RuntimeErrorKind::TypeMismatch {
-                expected: "Result".to_string(),
+                expected: "Optional` or `Result".to_string(),
                 found: "Int",
             }
         );
@@ -1516,7 +1576,7 @@ mod tests {
         assert_eq!(
             runtime_error("x: Int = 5 otherwise 6;"),
             RuntimeErrorKind::TypeMismatch {
-                expected: "Result".to_string(),
+                expected: "Optional` or `Result".to_string(),
                 found: "Int",
             }
         );
@@ -1530,6 +1590,66 @@ mod tests {
             text: Text = read_file(\"./data/notes.txt\") otherwise check read_file(\"../secret.txt\");
             print(text);";
         assert_eq!(run_in(&folder, script).unwrap(), "notes\n");
+    }
+
+    #[test]
+    fn get_counts_from_zero() {
+        let list = "items: List<Text> = [\"a\", \"b\"];";
+        assert_eq!(
+            output(&format!("{list} print(get(items, 0));")),
+            "Present(a)\n"
+        );
+        assert_eq!(output(&format!("{list} print(get(items, 2));")), "Absent\n");
+        assert!(matches!(
+            runtime_error(&format!("{list} x: Optional<Text> = get(items, -1);")),
+            RuntimeErrorKind::InvalidArgument {
+                function: "get",
+                ..
+            }
+        ));
+        assert_eq!(
+            runtime_error(&format!("{list} x: Optional<Int> = get(items, 0);")),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "Optional<Int>".to_string(),
+                found: "Optional",
+            }
+        );
+    }
+
+    #[test]
+    fn optional_with_check_and_otherwise() {
+        let list = "items: List<Int> = [10, 20];";
+        assert_eq!(
+            output(&format!("{list} print(check get(items, 1));")),
+            "20\n"
+        );
+        assert_eq!(
+            output(&format!("{list} print(get(items, 5) otherwise 0);")),
+            "0\n"
+        );
+        assert_eq!(
+            runtime_error(&format!("{list} x: Int = check get(items, 5);")),
+            RuntimeErrorKind::Failed(NO_VALUE.to_string())
+        );
+    }
+
+    #[test]
+    fn if_present_binds_only_inside_its_block() {
+        let body = "items: List<Text> = [\"a\", \"b\"];
+            if second: Text = get(items, 1) { print(second); } else { print(\"none\"); }
+            if third: Text = get(items, 2) { print(third); } else { print(\"none\"); }";
+        assert_eq!(output(body), "b\nnone\n");
+        assert_eq!(
+            runtime_error(
+                "items: List<Text> = [\"a\"];
+                 if first: Text = get(items, 0) { } print(first);"
+            ),
+            RuntimeErrorKind::UndefinedVariable("first".to_string())
+        );
+        assert!(matches!(
+            runtime_error("if x: Int = 5 { }"),
+            RuntimeErrorKind::TypeMismatch { found: "Int", .. }
+        ));
     }
 
     #[test]

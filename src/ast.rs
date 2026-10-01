@@ -72,6 +72,15 @@ pub enum StatementKind {
         then_block: Block,
         else_block: Option<Block>,
     },
+    /// `if name: Type = value { ... }`: runs the first block with `name`
+    /// bound when `value` is present (or a success), the `else` block otherwise.
+    IfPresent {
+        name: String,
+        declared_type: Type,
+        value: Expression,
+        then_block: Block,
+        else_block: Option<Block>,
+    },
     While {
         condition: Expression,
         body: Block,

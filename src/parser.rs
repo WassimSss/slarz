@@ -275,18 +275,13 @@ impl Parser {
     }
 
     fn if_statement(&mut self, start: Span) -> ParseResult<Statement> {
+        // `if name: Type = ...` declares a variable, like a declaration does.
+        if self.peek_identifier().is_some() && self.peek_second().kind == TokenKind::Colon {
+            return self.if_present(start);
+        }
         let condition = self.expression()?;
         let then_block = self.block()?;
-        let else_block = if self.consume(&TokenKind::Else) {
-            let else_start = self.peek().span;
-            if self.consume(&TokenKind::If) {
-                Some(vec![self.if_statement(else_start)?])
-            } else {
-                Some(self.block()?)
-            }
-        } else {
-            None
-        };
+        let else_block = self.else_block()?;
         Ok(self.finish(
             StatementKind::If {
                 condition,
@@ -295,6 +290,37 @@ impl Parser {
             },
             start,
         ))
+    }
+
+    fn if_present(&mut self, start: Span) -> ParseResult<Statement> {
+        let (name, _) = self.expect_identifier("a variable name")?;
+        self.expect(TokenKind::Colon, "`:` and a type after the variable name")?;
+        let declared_type = self.parse_type()?;
+        self.expect(TokenKind::Equal, "`=` and a value that may be absent")?;
+        let value = self.expression()?;
+        let then_block = self.block()?;
+        let else_block = self.else_block()?;
+        Ok(self.finish(
+            StatementKind::IfPresent {
+                name,
+                declared_type,
+                value,
+                then_block,
+                else_block,
+            },
+            start,
+        ))
+    }
+
+    fn else_block(&mut self) -> ParseResult<Option<Block>> {
+        if !self.consume(&TokenKind::Else) {
+            return Ok(None);
+        }
+        let else_start = self.peek().span;
+        if self.consume(&TokenKind::If) {
+            return Ok(Some(vec![self.if_statement(else_start)?]));
+        }
+        Ok(Some(self.block()?))
     }
 
     fn while_statement(&mut self, start: Span) -> ParseResult<Statement> {
@@ -918,6 +944,35 @@ mod tests {
         ));
         assert!(matches!(&parsed[1], StatementKind::While { .. }));
         assert!(matches!(&parsed[2], StatementKind::For { variable, .. } if variable == "file"));
+    }
+
+    #[test]
+    fn if_present() {
+        let parsed = statements(
+            "if second: Text = get(columns, 1) { print(second); }
+             else if ready { print(1); } else { print(2); }",
+        );
+        let StatementKind::IfPresent {
+            name,
+            declared_type,
+            value,
+            else_block,
+            ..
+        } = &parsed[0]
+        else {
+            panic!("expected an if-present");
+        };
+        assert_eq!(name, "second");
+        assert_eq!(declared_type.name, "Text");
+        assert_eq!(show(value), "(call get columns 1)");
+        assert!(matches!(
+            &else_block.as_ref().unwrap()[0].kind,
+            StatementKind::If { .. }
+        ));
+        assert_eq!(
+            body_error("if x: Text get(a, 1) { }").to_string(),
+            "expected `=` and a value that may be absent, found the name `get`"
+        );
     }
 
     #[test]

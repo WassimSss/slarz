@@ -8,19 +8,11 @@ var names: List<Text> = [];
 for line in lines(export) {
     if not starts_with(line, "name;") {
         columns: List<Text> = split(line, ";");
-        var name: Text = "";
-        var amount: Float = 0.0;
-        var index: Int = 0;
-        for column in columns {
-            if index == 0 {
-                name = to_upper(column);
-            } else {
-                amount = parse_float(trim(column)) otherwise 0.0;
-            }
-            index = index + 1;
+        name: Text = get(columns, 0) otherwise "?";
+        if amount: Text = get(columns, 1) {
+            total = total + (parse_float(trim(amount)) otherwise 0.0);
         }
-        names = append(names, name);
-        total = total + amount;
+        names = append(names, to_upper(name));
     }
 }
 

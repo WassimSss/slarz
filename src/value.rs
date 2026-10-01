@@ -19,6 +19,9 @@ pub enum Value {
     /// The two sides of a `Result`: an operation that worked, or why it failed.
     Success(Box<Value>),
     Failure(String),
+    /// The two sides of an `Optional`: a value, or none (which is not an error).
+    Present(Box<Value>),
+    Absent,
 }
 
 impl Value {
@@ -32,6 +35,7 @@ impl Value {
             Self::List(_) => "List",
             Self::Nothing => "Nothing",
             Self::Success(_) | Self::Failure(_) => "Result",
+            Self::Present(_) | Self::Absent => "Optional",
         }
     }
 }
@@ -61,6 +65,8 @@ impl fmt::Display for Value {
             Self::Nothing => write!(f, "nothing"),
             Self::Success(value) => write!(f, "Ok({value})"),
             Self::Failure(message) => write!(f, "Error({message})"),
+            Self::Present(value) => write!(f, "Present({value})"),
+            Self::Absent => write!(f, "Absent"),
         }
     }
 }
