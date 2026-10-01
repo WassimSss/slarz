@@ -19,7 +19,7 @@ use crate::value::Value;
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
 
-const BUILTINS: [&str; 15] = [
+const BUILTINS: [&str; 26] = [
     "print",
     "length",
     "append",
@@ -35,11 +35,26 @@ const BUILTINS: [&str; 15] = [
     "parse_float",
     "quotient",
     "remainder",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "replace_all",
+    "split",
+    "join",
+    "lines",
+    "trim",
+    "to_upper",
+    "to_lower",
+    "format_decimals",
 ];
 
 /// Beyond 2^53, a `Float` cannot hold every whole number: `to_float` would
 /// silently change the value.
 const LARGEST_EXACT_FLOAT_INTEGER: i64 = 1 << 53;
+
+/// A `Float` holds about 17 significant digits: more decimals would only
+/// print noise.
+const MAX_DECIMALS: usize = 17;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeErrorKind {
@@ -67,6 +82,11 @@ pub enum RuntimeErrorKind {
     InexactConversion {
         value: String,
         target: &'static str,
+    },
+    /// An argument of the right type, but a value that can only be a bug.
+    InvalidArgument {
+        function: &'static str,
+        reason: String,
     },
     WrongArgumentCount {
         function: String,
@@ -161,6 +181,7 @@ impl fmt::Display for RuntimeErrorKind {
                 f,
                 "`{value}` cannot be turned into a `{target}` without changing its value"
             ),
+            Self::InvalidArgument { function, reason } => write!(f, "`{function}`: {reason}"),
             Self::WrongArgumentCount {
                 function,
                 expected,
@@ -648,6 +669,19 @@ impl<W: Write> Interpreter<'_, W> {
             "parse_float" => return parse_float(values, span),
             "quotient" => return divide_integers("quotient", i64::checked_div, values, span),
             "remainder" => return divide_integers("remainder", i64::checked_rem, values, span),
+            "contains" => return test_text("contains", |t, part| t.contains(part), values, span),
+            "starts_with" => {
+                return test_text("starts_with", |t, start| t.starts_with(start), values, span);
+            }
+            "ends_with" => return test_text("ends_with", |t, end| t.ends_with(end), values, span),
+            "replace_all" => return replace_all(values, span),
+            "split" => return split(values, span),
+            "join" => return join(values, span),
+            "lines" => return lines(values, span),
+            "trim" => return transform_text("trim", |t| t.trim().to_string(), values, span),
+            "to_upper" => return transform_text("to_upper", str::to_uppercase, values, span),
+            "to_lower" => return transform_text("to_lower", str::to_lowercase, values, span),
+            "format_decimals" => return format_decimals(values, span),
             "append" => {
                 let [list, item] = exact_arguments("append", values, span)?;
                 return append_item(list, item, span);
@@ -921,6 +955,112 @@ fn divide_integers(
     }
 }
 
+fn test_text(
+    function: &str,
+    test: fn(&str, &str) -> bool,
+    arguments: Vec<Value>,
+    span: Span,
+) -> RunResult<Value> {
+    let [text, part] = exact_arguments(function, arguments, span)?;
+    let text = expect_text(text, span)?;
+    let part = expect_text(part, span)?;
+    Ok(Value::Bool(test(&text, &part)))
+}
+
+fn transform_text(
+    function: &str,
+    transform: fn(&str) -> String,
+    arguments: Vec<Value>,
+    span: Span,
+) -> RunResult<Value> {
+    let [text] = exact_arguments(function, arguments, span)?;
+    Ok(Value::Text(transform(&expect_text(text, span)?)))
+}
+
+fn replace_all(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [text, old, new] = exact_arguments("replace_all", arguments, span)?;
+    let text = expect_text(text, span)?;
+    let old = expect_text(old, span)?;
+    let new = expect_text(new, span)?;
+    if old.is_empty() {
+        return Err(invalid_argument(
+            "replace_all",
+            "the text to replace cannot be empty",
+            span,
+        ));
+    }
+    Ok(Value::Text(text.replace(&old, &new)))
+}
+
+// Empty pieces are kept: in `"a,,b"`, the empty column is still a column.
+fn split(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [text, separator] = exact_arguments("split", arguments, span)?;
+    let text = expect_text(text, span)?;
+    let separator = expect_text(separator, span)?;
+    if separator.is_empty() {
+        return Err(invalid_argument(
+            "split",
+            "the separator cannot be empty",
+            span,
+        ));
+    }
+    Ok(text_list(text.split(separator.as_str())))
+}
+
+fn join(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [list, separator] = exact_arguments("join", arguments, span)?;
+    let Value::List(items) = list else {
+        return Err(type_mismatch("List<Text>", &list, span));
+    };
+    let separator = expect_text(separator, span)?;
+    let mut texts = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        match item {
+            Value::Text(text) => texts.push(text.as_str()),
+            other => return Err(type_mismatch("Text", other, span)),
+        }
+    }
+    Ok(Value::Text(texts.join(&separator)))
+}
+
+// `str::lines` accepts both `\n` and `\r\n`, so a file saved on Windows gives
+// the same lines everywhere.
+fn lines(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [text] = exact_arguments("lines", arguments, span)?;
+    Ok(text_list(expect_text(text, span)?.lines()))
+}
+
+// Halves are rounded away from zero, like `round`: Rust's own formatting
+// would round them to even (2.5 to "2"). Values that are not exact in binary
+// keep their trap: 1.005 * 100 is 100.49999999999999, so 1.005 gives "1.00".
+// Amounts of money belong in `Int` cents, not in `Float`.
+fn format_decimals(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [number, decimals] = exact_arguments("format_decimals", arguments, span)?;
+    let number = expect_float(number, span)?;
+    let decimals = expect_integer(decimals, span)?;
+    // A negative count fails `try_from`.
+    let Some(decimals) = usize::try_from(decimals)
+        .ok()
+        .filter(|&decimals| decimals <= MAX_DECIMALS)
+    else {
+        return Err(invalid_argument(
+            "format_decimals",
+            &format!("the number of decimals must be between 0 and {MAX_DECIMALS}"),
+            span,
+        ));
+    };
+    let factor = 10_f64.powi(decimals as i32);
+    let rounded = (number * factor).round() / factor;
+    // Huge numbers overflow once scaled, but they have no decimals to round.
+    let rounded = if rounded.is_finite() { rounded } else { number };
+    Ok(Value::Text(format!("{rounded:.decimals$}")))
+}
+
+fn text_list<'a>(pieces: impl Iterator<Item = &'a str>) -> Value {
+    let list = pieces.map(|piece| Value::Text(piece.to_string())).collect();
+    Value::List(Rc::new(list))
+}
+
 fn append_item(list: Value, item: Value, span: Span) -> RunResult<Value> {
     let Value::List(mut items) = list else {
         return Err(error(
@@ -1012,6 +1152,11 @@ fn not_a_result(value: &Value, span: Span) -> RuntimeError {
 
 fn inexact(value: String, target: &'static str, span: Span) -> RuntimeError {
     error(RuntimeErrorKind::InexactConversion { value, target }, span)
+}
+
+fn invalid_argument(function: &'static str, reason: &str, span: Span) -> RuntimeError {
+    let reason = reason.to_string();
+    error(RuntimeErrorKind::InvalidArgument { function, reason }, span)
 }
 
 // Until the checker exists, types are checked while the script runs.
@@ -1459,6 +1604,110 @@ mod tests {
             runtime_error("x: Int = quotient(-9223372036854775807 - 1, -1);"),
             RuntimeErrorKind::Overflow
         );
+    }
+
+    #[test]
+    fn text_tests() {
+        assert_eq!(
+            output("print(contains(\"invoice-03.pdf\", \"03\"));"),
+            "true\n"
+        );
+        assert_eq!(
+            output("print(starts_with(\"invoice.pdf\", \"inv\"));"),
+            "true\n"
+        );
+        assert_eq!(
+            output("print(ends_with(\"invoice.pdf\", \".csv\"));"),
+            "false\n"
+        );
+        assert_eq!(
+            runtime_error("x: Bool = contains(\"abc\", 1);"),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "Text".to_string(),
+                found: "Int",
+            }
+        );
+    }
+
+    #[test]
+    fn text_transformations() {
+        assert_eq!(
+            output("print(replace_all(\"a;b;c\", \";\", \",\"));"),
+            "a,b,c\n"
+        );
+        assert_eq!(output("print(trim(\"  42 \\n\"));"), "42\n");
+        assert_eq!(output("print(to_upper(\"été\"));"), "ÉTÉ\n");
+        assert_eq!(output("print(to_lower(\"ÉTÉ\"));"), "été\n");
+        assert_eq!(
+            runtime_error("x: Text = replace_all(\"abc\", \"\", \"-\");"),
+            RuntimeErrorKind::InvalidArgument {
+                function: "replace_all",
+                reason: "the text to replace cannot be empty".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn splitting_and_joining() {
+        assert_eq!(
+            output("print(split(\"a,,b\", \",\"));"),
+            "[\"a\", \"\", \"b\"]\n"
+        );
+        assert_eq!(
+            output("print(lines(\"one\\ntwo\\n\\nfour\\n\"));"),
+            "[\"one\", \"two\", \"\", \"four\"]\n"
+        );
+        assert_eq!(output("print(join([\"a\", \"b\"], \", \"));"), "a, b\n");
+        assert_eq!(
+            output("empty: List<Text> = []; print(join(empty, \", \"));"),
+            "\n"
+        );
+        assert!(matches!(
+            runtime_error("x: List<Text> = split(\"abc\", \"\");"),
+            RuntimeErrorKind::InvalidArgument {
+                function: "split",
+                ..
+            }
+        ));
+        assert_eq!(
+            runtime_error("x: Text = join([1, 2], \",\");"),
+            RuntimeErrorKind::TypeMismatch {
+                expected: "Text".to_string(),
+                found: "Int",
+            }
+        );
+    }
+
+    // Slarz has no `\r` escape: only a file can hold Windows line endings.
+    #[test]
+    fn lines_ignore_windows_line_endings() {
+        let folder = fixture("windows-lines");
+        std::fs::write(folder.join("data/windows.txt"), "one\r\ntwo\r\n").unwrap();
+        let script = "permissions { read folder \"./data\"; }
+            print(lines(check read_file(\"./data/windows.txt\")));";
+        assert_eq!(run_in(&folder, script).unwrap(), "[\"one\", \"two\"]\n");
+    }
+
+    #[test]
+    fn formatting_decimals() {
+        assert_eq!(output("print(format_decimals(33.3333, 2));"), "33.33\n");
+        // Halves round like `round`, away from zero (Rust's formatting alone
+        // would give "2" and "0.12").
+        assert_eq!(output("print(format_decimals(2.5, 0));"), "3\n");
+        assert_eq!(output("print(format_decimals(-2.5, 0));"), "-3\n");
+        assert_eq!(output("print(format_decimals(0.125, 2));"), "0.13\n");
+        assert_eq!(output("print(format_decimals(2.675, 2));"), "2.68\n");
+        // 1.005 * 100 is 100.49999999999999 in binary: the documented trap.
+        assert_eq!(output("print(format_decimals(1.005, 2));"), "1.00\n");
+        for invalid in ["-1", "18"] {
+            assert!(matches!(
+                runtime_error(&format!("x: Text = format_decimals(1.0, {invalid});")),
+                RuntimeErrorKind::InvalidArgument {
+                    function: "format_decimals",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

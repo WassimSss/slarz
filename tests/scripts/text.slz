@@ -1,0 +1,30 @@
+permissions { }
+
+// A small export, as it could come out of a file.
+export: Text = "name;amount\nAda;12.5\nGrace; 7\n";
+
+var total: Float = 0.0;
+var names: List<Text> = [];
+for line in lines(export) {
+    if not starts_with(line, "name;") {
+        columns: List<Text> = split(line, ";");
+        var name: Text = "";
+        var amount: Float = 0.0;
+        var index: Int = 0;
+        for column in columns {
+            if index == 0 {
+                name = to_upper(column);
+            } else {
+                amount = parse_float(trim(column)) otherwise 0.0;
+            }
+            index = index + 1;
+        }
+        names = append(names, name);
+        total = total + amount;
+    }
+}
+
+print(join(names, ", "));
+print("total: " + format_decimals(total, 2));
+print(replace_all("2026-10-01", "-", "/"));
+print(contains(export, "Grace") and ends_with(export, "\n"));
