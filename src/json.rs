@@ -21,6 +21,80 @@ pub enum Json {
     Object(Vec<(String, Json)>),
 }
 
+impl Json {
+    /// The value of `key`, if this is an object that has it.
+    pub fn field(&self, key: &str) -> Option<&Json> {
+        match self {
+            Self::Object(fields) => fields
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    /// What kind of value this is, as a sentence fragment: "a number".
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Bool(_) => "a boolean",
+            Self::Number(_) => "a number",
+            Self::Text(_) => "a text",
+            Self::List(_) => "a list",
+            Self::Object(_) => "an object",
+        }
+    }
+}
+
+/// Writes compact JSON, keys in their original order.
+impl fmt::Display for Json {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => write!(f, "null"),
+            Self::Bool(value) => write!(f, "{value}"),
+            Self::Number(number) => write!(f, "{number}"),
+            Self::Text(text) => write_text(f, text),
+            Self::List(items) => {
+                write!(f, "[")?;
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
+            Self::Object(fields) => {
+                write!(f, "{{")?;
+                for (index, (key, value)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ",")?;
+                    }
+                    write_text(f, key)?;
+                    write!(f, ":{value}")?;
+                }
+                write!(f, "}}")
+            }
+        }
+    }
+}
+
+fn write_text(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
+    write!(f, "\"")?;
+    for character in text.chars() {
+        match character {
+            '"' => write!(f, "\\\"")?,
+            '\\' => write!(f, "\\\\")?,
+            '\n' => write!(f, "\\n")?,
+            '\r' => write!(f, "\\r")?,
+            '\t' => write!(f, "\\t")?,
+            control if control < ' ' => write!(f, "\\u{:04x}", u32::from(control))?,
+            other => write!(f, "{other}")?,
+        }
+    }
+    write!(f, "\"")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonError {
     pub message: String,
@@ -411,6 +485,26 @@ mod tests {
         assert_eq!(message(&too_deep), "nested more than 128 levels deep");
         let attack = "[".repeat(1_000_000);
         assert!(parse(&attack).is_err());
+    }
+
+    #[test]
+    fn writes_compact_json_that_reads_back() {
+        let source = r#"{ "name": "a \"b\"\n\u0001é", "n": -1.5e3, "list": [true, null, {}] }"#;
+        let written = parse(source).unwrap().to_string();
+        assert_eq!(
+            written,
+            r#"{"name":"a \"b\"\n\u0001é","n":-1.5e3,"list":[true,null,{}]}"#
+        );
+        assert_eq!(parse(&written), parse(source));
+    }
+
+    #[test]
+    fn fields() {
+        let user = parse(r#"{"login": "WassimSss", "company": null}"#).unwrap();
+        assert_eq!(user.field("login"), Some(&text("WassimSss")));
+        assert_eq!(user.field("company"), Some(&Json::Null));
+        assert_eq!(user.field("email"), None);
+        assert_eq!(Json::List(vec![]).field("login"), None);
     }
 
     #[test]

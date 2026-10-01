@@ -3,6 +3,8 @@
 use std::fmt;
 use std::rc::Rc;
 
+use crate::json::Json;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Integer(i64),
@@ -22,6 +24,8 @@ pub enum Value {
     /// The two sides of an `Optional`: a value, or none (which is not an error).
     Present(Box<Value>),
     Absent,
+    /// A JSON document, shared like a list: copying it costs nothing.
+    Json(Rc<Json>),
 }
 
 impl Value {
@@ -36,6 +40,7 @@ impl Value {
             Self::Nothing => "Nothing",
             Self::Success(_) | Self::Failure(_) => "Result",
             Self::Present(_) | Self::Absent => "Optional",
+            Self::Json(_) => "Json",
         }
     }
 }
@@ -67,6 +72,7 @@ impl fmt::Display for Value {
             Self::Failure(message) => write!(f, "Error({message})"),
             Self::Present(value) => write!(f, "Present({value})"),
             Self::Absent => write!(f, "Absent"),
+            Self::Json(json) => write!(f, "{json}"),
         }
     }
 }

@@ -1,0 +1,22 @@
+permissions {
+    read file "./api/github-repos.json";
+}
+
+// A saved answer from the GitHub API: the list of a user's repositories.
+repos: Json = check parse_json(check read_file("./api/github-repos.json"));
+
+var stars: Int = 0;
+for repo in check as_list(repos) {
+    name: Text = check text_field(repo, "name");
+    owner: Text = check text_field(check field(repo, "owner"), "login");
+    description: Text = text_field(repo, "description") otherwise "(no description)";
+    if not check bool_field(repo, "fork") {
+        stars = stars + check int_field(repo, "stargazers_count");
+    }
+    print(owner + "/" + name + ": " + description);
+}
+print("stars on original repositories: " + to_text(stars));
+
+// Identifiers keep all their digits.
+first: Json = check get(check as_list(repos), 0);
+print(check int_field(first, "id"));

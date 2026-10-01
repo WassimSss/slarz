@@ -11,6 +11,7 @@ use crate::ast::{
     BinaryOperator, Block, Expression, ExpressionKind, Function, Program, Statement, StatementKind,
     Type, UnaryOperator,
 };
+use crate::json::{self, Json};
 use crate::permissions::{Denial, Permissions};
 use crate::token::Span;
 use crate::value::Value;
@@ -19,7 +20,7 @@ use crate::value::Value;
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
 
-const BUILTINS: [&str; 28] = [
+const BUILTINS: [&str; 41] = [
     "print",
     "length",
     "append",
@@ -48,6 +49,19 @@ const BUILTINS: [&str; 28] = [
     "to_upper",
     "to_lower",
     "format_decimals",
+    "parse_json",
+    "field",
+    "text_field",
+    "int_field",
+    "float_field",
+    "bool_field",
+    "as_text",
+    "as_int",
+    "as_float",
+    "as_bool",
+    "as_list",
+    "is_null",
+    "has_field",
 ];
 
 /// Beyond 2^53, a `Float` cannot hold every whole number: `to_float` would
@@ -163,7 +177,7 @@ impl fmt::Display for RuntimeErrorKind {
             Self::UnknownType(name) => write!(
                 f,
                 "unknown type `{name}`: the available types are `Int`, `Float`, `Text`, `Bool`, \
-                 `List<T>`, `Optional<T>` and `Result<T, Error>`"
+                 `Json`, `List<T>`, `Optional<T>` and `Result<T, Error>`"
             ),
             Self::InvalidOperands {
                 operator,
@@ -721,6 +735,19 @@ impl<W: Write> Interpreter<'_, W> {
             "to_upper" => return transform_text("to_upper", str::to_uppercase, values, span),
             "to_lower" => return transform_text("to_lower", str::to_lowercase, values, span),
             "format_decimals" => return format_decimals(values, span),
+            "parse_json" => return parse_json(values, span),
+            "field" => return read_field("field", JsonTarget::Json, values, span),
+            "text_field" => return read_field("text_field", JsonTarget::Text, values, span),
+            "int_field" => return read_field("int_field", JsonTarget::Int, values, span),
+            "float_field" => return read_field("float_field", JsonTarget::Float, values, span),
+            "bool_field" => return read_field("bool_field", JsonTarget::Bool, values, span),
+            "as_text" => return read_as("as_text", JsonTarget::Text, values, span),
+            "as_int" => return read_as("as_int", JsonTarget::Int, values, span),
+            "as_float" => return read_as("as_float", JsonTarget::Float, values, span),
+            "as_bool" => return read_as("as_bool", JsonTarget::Bool, values, span),
+            "as_list" => return read_as("as_list", JsonTarget::List, values, span),
+            "is_null" => return is_null(values, span),
+            "has_field" => return has_field(values, span),
             "append" => {
                 let [list, item] = exact_arguments("append", values, span)?;
                 return append_item(list, item, span);
@@ -1159,6 +1186,127 @@ fn format_decimals(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
     Ok(Value::Text(format!("{rounded:.decimals$}")))
 }
 
+#[derive(Debug, Clone, Copy)]
+enum JsonTarget {
+    Json,
+    Text,
+    Int,
+    Float,
+    Bool,
+    List,
+}
+
+fn parse_json(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [text] = exact_arguments("parse_json", arguments, span)?;
+    let text = expect_text(text, span)?;
+    Ok(result_value(
+        json::parse(&text)
+            .map(|parsed| Value::Json(Rc::new(parsed)))
+            .map_err(|error| error.to_string()),
+    ))
+}
+
+fn read_field(
+    function: &str,
+    target: JsonTarget,
+    arguments: Vec<Value>,
+    span: Span,
+) -> RunResult<Value> {
+    let [json, key] = exact_arguments(function, arguments, span)?;
+    let json = expect_json(json, span)?;
+    let key = expect_text(key, span)?;
+    let found = match &*json {
+        Json::Object(_) => json
+            .field(&key)
+            .ok_or_else(|| format!("there is no field `{key}`")),
+        other => Err(format!(
+            "cannot read field `{key}`: the value is {}, not an object",
+            other.kind()
+        )),
+    };
+    Ok(result_value(found.and_then(|value| {
+        convert_json(value, target).map_err(|problem| format!("field `{key}` {problem}"))
+    })))
+}
+
+fn read_as(
+    function: &str,
+    target: JsonTarget,
+    arguments: Vec<Value>,
+    span: Span,
+) -> RunResult<Value> {
+    let [json] = exact_arguments(function, arguments, span)?;
+    let json = expect_json(json, span)?;
+    Ok(result_value(
+        convert_json(&json, target).map_err(|problem| format!("the value {problem}")),
+    ))
+}
+
+// Messages say what kind of value was found, never the value itself: they
+// end up in logs, and the value may be private.
+fn convert_json(json: &Json, target: JsonTarget) -> Result<Value, String> {
+    let converted = match (target, json) {
+        (JsonTarget::Json, json) => Some(Value::Json(Rc::new(json.clone()))),
+        (JsonTarget::Text, Json::Text(text)) => Some(Value::Text(text.clone())),
+        (JsonTarget::Bool, Json::Bool(value)) => Some(Value::Bool(*value)),
+        (JsonTarget::Int, Json::Number(number)) => {
+            if !is_plain_number(number, false) {
+                return Err("is a number but not a whole one: read it as a `Float`".to_string());
+            }
+            let integer = number
+                .parse()
+                .map_err(|_| "is a whole number too large for an `Int`".to_string())?;
+            Some(Value::Integer(integer))
+        }
+        (JsonTarget::Float, Json::Number(number)) => {
+            let float = number
+                .parse::<f64>()
+                .ok()
+                .filter(|float| float.is_finite())
+                .ok_or_else(|| "is a number too large for a `Float`".to_string())?;
+            Some(Value::Float(float))
+        }
+        (JsonTarget::List, Json::List(items)) => {
+            let items = items
+                .iter()
+                .map(|item| Value::Json(Rc::new(item.clone())))
+                .collect();
+            Some(Value::List(Rc::new(items)))
+        }
+        _ => None,
+    };
+    converted.ok_or_else(|| format!("is {}, not {}", json.kind(), target_name(target)))
+}
+
+fn target_name(target: JsonTarget) -> &'static str {
+    match target {
+        JsonTarget::Json => "a JSON value",
+        JsonTarget::Text => "a text",
+        JsonTarget::Int | JsonTarget::Float => "a number",
+        JsonTarget::Bool => "a boolean",
+        JsonTarget::List => "a list",
+    }
+}
+
+fn is_null(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [json] = exact_arguments("is_null", arguments, span)?;
+    Ok(Value::Bool(*expect_json(json, span)? == Json::Null))
+}
+
+fn has_field(arguments: Vec<Value>, span: Span) -> RunResult<Value> {
+    let [json, key] = exact_arguments("has_field", arguments, span)?;
+    let json = expect_json(json, span)?;
+    let key = expect_text(key, span)?;
+    Ok(Value::Bool(json.field(&key).is_some()))
+}
+
+fn result_value(result: Result<Value, String>) -> Value {
+    match result {
+        Ok(value) => Value::Success(Box::new(value)),
+        Err(message) => Value::Failure(message),
+    }
+}
+
 fn text_list<'a>(pieces: impl Iterator<Item = &'a str>) -> Value {
     let list = pieces.map(|piece| Value::Text(piece.to_string())).collect();
     Value::List(Rc::new(list))
@@ -1228,6 +1376,13 @@ fn expect_integer(value: Value, span: Span) -> RunResult<i64> {
     }
 }
 
+fn expect_json(value: Value, span: Span) -> RunResult<Rc<Json>> {
+    match value {
+        Value::Json(json) => Ok(json),
+        other => Err(type_mismatch("Json", &other, span)),
+    }
+}
+
 fn expect_float(value: Value, span: Span) -> RunResult<f64> {
     match value {
         Value::Float(float) => Ok(float),
@@ -1278,7 +1433,7 @@ fn check_type(value: &Value, declared: &Type, span: Span) -> RunResult<()> {
 
 fn conforms(value: &Value, declared: &Type) -> RunResult<bool> {
     match (declared.name.as_str(), declared.arguments.as_slice()) {
-        ("Int" | "Float" | "Text" | "Bool", []) => Ok(value.type_name() == declared.name),
+        ("Int" | "Float" | "Text" | "Bool" | "Json", []) => Ok(value.type_name() == declared.name),
         ("List", [element]) => match value {
             // Lists hold a single type, so the first item speaks for all.
             Value::List(items) => items
@@ -1638,6 +1793,105 @@ mod tests {
             text: Text = read_file(\"./data/notes.txt\") otherwise check read_file(\"../secret.txt\");
             print(text);";
         assert_eq!(run_in(&folder, script).unwrap(), "notes\n");
+    }
+
+    const USER: &str = r#"user: Json = check parse_json("{\"login\": \"ada\", \"id\": 1234567890123456789, \"score\": 2.5, \"admin\": false, \"company\": null, \"repos\": [{\"name\": \"slarz\"}]}");"#;
+
+    fn json_output(body: &str) -> String {
+        output(&format!("{USER} {body}"))
+    }
+
+    fn json_failure(body: &str) -> String {
+        let printed = json_output(&format!("print({body});"));
+        printed
+            .strip_prefix("Error(")
+            .and_then(|rest| rest.strip_suffix(")\n"))
+            .unwrap_or(&printed)
+            .to_string()
+    }
+
+    #[test]
+    fn json_fields() {
+        assert_eq!(
+            json_output("print(check text_field(user, \"login\"));"),
+            "ada\n"
+        );
+        assert_eq!(
+            json_output("print(check int_field(user, \"id\"));"),
+            "1234567890123456789\n"
+        );
+        assert_eq!(
+            json_output("print(check float_field(user, \"score\"));"),
+            "2.5\n"
+        );
+        assert_eq!(
+            json_output("print(check bool_field(user, \"admin\"));"),
+            "false\n"
+        );
+        assert_eq!(
+            json_output("print(text_field(user, \"company\") otherwise \"none\");"),
+            "none\n"
+        );
+        assert_eq!(
+            json_output(
+                "for repo in check as_list(check field(user, \"repos\")) {
+                     print(check text_field(repo, \"name\"));
+                 }"
+            ),
+            "slarz\n"
+        );
+    }
+
+    #[test]
+    fn json_failures_explain_what_was_found() {
+        assert_eq!(
+            json_failure("text_field(user, \"email\")"),
+            "there is no field `email`"
+        );
+        assert_eq!(
+            json_failure("text_field(user, \"id\")"),
+            "field `id` is a number, not a text"
+        );
+        assert_eq!(
+            json_failure("int_field(user, \"score\")"),
+            "field `score` is a number but not a whole one: read it as a `Float`"
+        );
+        assert_eq!(
+            json_failure("text_field(user, \"company\")"),
+            "field `company` is null, not a text"
+        );
+        assert_eq!(
+            json_failure("as_text(check field(user, \"repos\"))"),
+            "the value is a list, not a text"
+        );
+        assert_eq!(
+            json_failure("field(check field(user, \"repos\"), \"name\")"),
+            "cannot read field `name`: the value is a list, not an object"
+        );
+        assert_eq!(
+            output("print(parse_json(\"{\\\"a\\\": 1, \\\"a\\\": 2}\"));"),
+            "Error(invalid JSON at line 1, column 10: the key \"a\" appears twice)\n"
+        );
+    }
+
+    #[test]
+    fn json_absent_and_null_differ() {
+        assert_eq!(
+            json_output(
+                "print(has_field(user, \"company\"));
+                 print(is_null(check field(user, \"company\")));
+                 print(has_field(user, \"email\"));"
+            ),
+            "true\ntrue\nfalse\n"
+        );
+    }
+
+    #[test]
+    fn json_prints_as_compact_json() {
+        assert_eq!(
+            json_output("print(check field(user, \"repos\"));"),
+            "[{\"name\":\"slarz\"}]\n"
+        );
     }
 
     #[test]
