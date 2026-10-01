@@ -1,0 +1,8 @@
+permissions {
+    env "SLARZ_GOLDEN_SECRET";
+}
+
+// Trying names one after the other stops at the first undeclared one.
+first: Text = env("SLARZ_GOLDEN_SECRET") otherwise "";
+second: Text = env("AWS_SECRET_ACCESS_KEY") otherwise "";
+print("never printed");

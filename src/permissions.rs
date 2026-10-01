@@ -27,6 +27,7 @@ pub struct Permissions {
     base: PathBuf,
     read: Vec<PathGrant>,
     write: Vec<PathGrant>,
+    env: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -45,6 +46,7 @@ impl Permissions {
             .map_or_else(|| real_path(Path::new(".")), Path::to_path_buf);
         let mut read = Vec::new();
         let mut write = Vec::new();
+        let mut env = Vec::new();
         for permission in declared {
             match &permission.kind {
                 // What is read must already exist.
@@ -66,7 +68,8 @@ impl Permissions {
                     target: access.target,
                     path: real_path(&base.join(&access.path)),
                 }),
-                PermissionKind::Network { .. } | PermissionKind::Env { .. } => {}
+                PermissionKind::Env { name } => env.push(name.clone()),
+                PermissionKind::Network { .. } => {}
             }
         }
         Ok(Self {
@@ -74,6 +77,7 @@ impl Permissions {
             base,
             read,
             write,
+            env,
         })
     }
 
@@ -101,6 +105,12 @@ impl Permissions {
         } else {
             Err(Denial::NotDeclared)
         }
+    }
+
+    /// Names are compared exactly: Windows ignores their case, other systems
+    /// do not, and a script must behave the same everywhere.
+    pub fn allows_env(&self, name: &str) -> bool {
+        self.env.iter().any(|declared| declared == name)
     }
 }
 

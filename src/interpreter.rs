@@ -19,7 +19,7 @@ use crate::value::Value;
 /// before the interpreter itself runs out of stack.
 const MAX_CALL_DEPTH: usize = 100;
 
-const BUILTINS: [&str; 27] = [
+const BUILTINS: [&str; 28] = [
     "print",
     "length",
     "append",
@@ -27,6 +27,7 @@ const BUILTINS: [&str; 27] = [
     "read_file",
     "write_file",
     "list_folder",
+    "env",
     "to_float",
     "round",
     "floor",
@@ -682,6 +683,11 @@ impl<W: Write> Interpreter<'_, W> {
     }
 
     fn call(&mut self, name: &str, arguments: &[Expression], span: Span) -> RunResult<Value> {
+        // `env` looks at how its argument is written, so it runs before
+        // the arguments are evaluated.
+        if name == "env" {
+            return self.env(arguments, span);
+        }
         let mut values = Vec::with_capacity(arguments.len());
         for argument in arguments {
             values.push(self.evaluate(argument)?);
@@ -859,6 +865,48 @@ impl<W: Write> Interpreter<'_, W> {
         paths.sort();
         let list = paths.into_iter().map(Value::Text).collect();
         Ok(Value::Success(Box::new(Value::List(Rc::new(list)))))
+    }
+
+    // The name must be written in quotes: a computed name would let outside
+    // data (an API response, a file) pick which secret to read.
+    fn env(&self, arguments: &[Expression], span: Span) -> RunResult<Value> {
+        let [argument] = arguments else {
+            return Err(error(
+                RuntimeErrorKind::WrongArgumentCount {
+                    function: "env".to_string(),
+                    expected: 1,
+                    found: arguments.len(),
+                },
+                span,
+            ));
+        };
+        let ExpressionKind::Text(name) = &argument.kind else {
+            return Err(invalid_argument(
+                "env",
+                "the variable name must be written in quotes, like `env(\"GITHUB_TOKEN\")`, \
+                 so that anyone reading the script sees which secrets it reads",
+                argument.span,
+            ));
+        };
+        if !self.permissions.allows_env(name) {
+            return Err(error(
+                RuntimeErrorKind::PermissionDenied {
+                    access: "read the environment variable",
+                    path: name.clone(),
+                },
+                span,
+            ));
+        }
+        match std::env::var(name) {
+            Ok(value) => Ok(Value::Present(Box::new(Value::Text(value)))),
+            Err(std::env::VarError::NotPresent) => Ok(Value::Absent),
+            // Saying "absent" would be false: the variable exists.
+            Err(std::env::VarError::NotUnicode(_)) => Err(invalid_argument(
+                "env",
+                &format!("`{name}` is defined but does not hold valid text"),
+                span,
+            )),
+        }
     }
 
     fn write_file(&mut self, arguments: Vec<Value>, span: Span) -> RunResult<Value> {
@@ -1614,6 +1662,60 @@ mod tests {
                 found: "Optional",
             }
         );
+    }
+
+    fn run_with_header(source: &str) -> Result<String, RuntimeErrorKind> {
+        let program = parse(tokenize(source).unwrap()).unwrap();
+        let mut output = Vec::new();
+        run(&program, Path::new("script.slz"), &mut output).map_err(|error| error.kind)?;
+        Ok(String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn env_reads_only_declared_names() {
+        let missing = "SLARZ_TEST_VARIABLE_THAT_IS_NEVER_DEFINED";
+        assert_eq!(
+            run_with_header(&format!(
+                "permissions {{ env \"{missing}\"; }} print(env(\"{missing}\"));"
+            )),
+            Ok("Absent\n".to_string())
+        );
+        // A loop trying names stops at the first undeclared one: the
+        // violation cannot be caught by `otherwise`.
+        let denied = run_with_header(
+            "permissions { env \"GITHUB_TOKEN\"; }
+             x: Text = env(\"AWS_SECRET_KEY\") otherwise \"\";",
+        )
+        .unwrap_err();
+        assert_eq!(
+            denied,
+            RuntimeErrorKind::PermissionDenied {
+                access: "read the environment variable",
+                path: "AWS_SECRET_KEY".to_string(),
+            }
+        );
+        assert!(denied.is_permission_violation());
+        // Names are compared exactly, whatever the system.
+        assert!(matches!(
+            run_with_header("permissions { env \"Path\"; } x: Optional<Text> = env(\"PATH\");"),
+            Err(RuntimeErrorKind::PermissionDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn env_needs_a_name_written_in_quotes() {
+        let error = run_with_header(
+            "permissions { env \"GITHUB_TOKEN\"; }
+             name: Text = \"GITHUB_TOKEN\";
+             x: Optional<Text> = env(name);",
+        );
+        assert!(matches!(
+            error,
+            Err(RuntimeErrorKind::InvalidArgument {
+                function: "env",
+                ..
+            })
+        ));
     }
 
     #[test]

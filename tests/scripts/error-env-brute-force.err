@@ -1,0 +1,1 @@
+error: error-env-brute-force.slz:7:16: permission denied: this script may not read the environment variable `AWS_SECRET_ACCESS_KEY`, because its `permissions` block does not allow it

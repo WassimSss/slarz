@@ -87,8 +87,9 @@ Slarz does not make AI models trustworthy. It cannot stop a model from being man
 | Parser | ✅ done |
 | Interpreter | ✅ variables, functions, `if`, `while`, `for`, lists, `check` |
 | Type checker | 🔜 types are checked while the script runs for now |
-| Permissions | 🟡 `read` and `write` are enforced (`read_file`, `list_folder`, `write_file`); `network` and `env` are coming |
-| Network, environment variables | 🔜 |
+| Permissions | 🟡 `read`, `write` and `env` are enforced (`read_file`, `list_folder`, `write_file`, `env`); `network` is coming |
+| Environment variables | ✅ `env("NAME")`, only for declared names written in quotes |
+| Network | 🔜 |
 
 ## Installation
 

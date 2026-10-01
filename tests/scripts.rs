@@ -5,6 +5,9 @@
 //! - `name.err`: the error it must report (none if the file is absent);
 //! - `name.code`: its exit code, when it is neither 0 (success) nor 1 (error).
 //!
+//! Every script runs with the environment variable `SLARZ_GOLDEN_SECRET` set
+//! to `s3cr3t`, so that `env` can be tested.
+//!
 //! Adding a test means adding a script and its expected files: no Rust needed.
 
 use std::fs;
@@ -42,6 +45,7 @@ fn check_script(folder: &Path, script: &Path) -> Option<String> {
     let result = Command::new(env!("CARGO_BIN_EXE_slarz"))
         .arg(&name)
         .current_dir(folder)
+        .env("SLARZ_GOLDEN_SECRET", "s3cr3t")
         .output()
         .unwrap();
 
