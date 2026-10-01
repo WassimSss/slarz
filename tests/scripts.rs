@@ -92,3 +92,63 @@ fn check_script(folder: &Path, script: &Path) -> Option<String> {
 fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
+
+/// The scripts shown to visitors must keep working: `examples/`, and every
+/// Slarz code block of the README (those starting with `permissions`).
+#[test]
+fn examples_and_readme_run() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut failures = Vec::new();
+
+    for entry in fs::read_dir(root.join("examples")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "slz") {
+            failures.extend(run_successfully(&path));
+        }
+    }
+
+    let readme = normalize(&fs::read_to_string(root.join("README.md")).unwrap());
+    let folder = std::env::temp_dir().join(format!("slarz-readme-{}", std::process::id()));
+    fs::create_dir_all(&folder).unwrap();
+    for (index, block) in code_blocks(&readme).iter().enumerate() {
+        if block.trim_start().starts_with("permissions") {
+            let script = folder.join(format!("readme-{index}.slz"));
+            fs::write(&script, block).unwrap();
+            failures.extend(run_successfully(&script));
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+fn run_successfully(script: &Path) -> Option<String> {
+    let result = Command::new(env!("CARGO_BIN_EXE_slarz"))
+        .arg(script.file_name()?)
+        .current_dir(script.parent()?)
+        .output()
+        .unwrap();
+    (!result.status.success()).then(|| {
+        format!(
+            "{} failed:\n{}",
+            script.display(),
+            String::from_utf8_lossy(&result.stderr)
+        )
+    })
+}
+
+fn code_blocks(markdown: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<String> = None;
+    for line in markdown.lines() {
+        match (&mut current, line.starts_with("```")) {
+            (None, true) => current = Some(String::new()),
+            (Some(_), true) => blocks.extend(current.take()),
+            (Some(block), false) => {
+                block.push_str(line);
+                block.push('\n');
+            }
+            (None, false) => {}
+        }
+    }
+    blocks
+}
