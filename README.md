@@ -6,7 +6,7 @@
 
 **A scripting language designed for AI agents: easy for an AI to write, easy for a human to review, and unable to do anything it was not allowed to.**
 
-> 🚧 Early development: the interpreter runs its first scripts and enforces file permissions. This project is built in public, one step at a time.
+> 🚧 Early development: the interpreter runs real scripts and enforces file and environment permissions. This project is built in public, one step at a time.
 
 ## Why
 
@@ -56,7 +56,7 @@ The core semantics of v0 are settled. Each rule removes a common source of bugs 
 - **No silent failures.** Operations that can fail say so in their type, and the failure must be handled. A permission violation stops the script immediately and cannot be caught, so a script cannot probe what it is allowed to do.
 - **Immutable by default, copies on assignment.** A value never changes behind your back.
 - **One equality.** Values are compared by content, only between values of the same type, with no hidden conversions.
-- **No surprising arithmetic.** Integer overflow and division by zero stop the script. Dividing two integers is not allowed with `/`, because languages disagree on whether `7 / 2` is `3` or `3.5`.
+- **No surprising arithmetic.** Integer overflow and division by zero stop the script. Dividing two integers is not allowed with `/`, because languages disagree on whether `7 / 2` is `3` or `3.5`: write `quotient(7, 2)` or `7.0 / 2.0`.
 - **Left-to-right evaluation, guaranteed.** Side effects always happen in the order they are written.
 
 ## Security layers
@@ -85,7 +85,8 @@ Slarz does not make AI models trustworthy. It cannot stop a model from being man
 |---|---|
 | Lexer | ✅ done |
 | Parser | ✅ done |
-| Interpreter | ✅ variables, functions, `if`, `while`, `for`, lists, `check` |
+| Interpreter | ✅ variables, functions, `if` (also as a value), `while`, `for`, lists, `Result` and `Optional` with `check`, `otherwise` and `if name: Type = ...` |
+| Built-in functions | 🟡 files, text, number conversions, `get`, `env`; JSON and HTTP are coming |
 | Type checker | 🔜 types are checked while the script runs for now |
 | Permissions | 🟡 `read`, `write` and `env` are enforced (`read_file`, `list_folder`, `write_file`, `env`); `network` is coming |
 | Environment variables | ✅ `env("NAME")`, only for declared names written in quotes |
